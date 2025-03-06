@@ -15,13 +15,19 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 import uuid
-from intersight.api import uuidpool_api
-from intersight.api import bios_api
-from intersight.api import boot_api
-from intersight.api import fabric_api
-from intersight.api import macpool_api
-from intersight.api import storage_api
-from intersight.api import vnic_api
+from intersight.api import (
+    bios_api,
+    boot_api,
+    compute_api,
+    fabric_api,
+    iam_api,
+    macpool_api,
+    organization_api,
+    server_api,
+    storage_api,
+    uuidpool_api,
+    vnic_api
+)
 from intersight.model.vnic_lan_connectivity_policy import VnicLanConnectivityPolicy
 from intersight.model.vnic_eth_if import VnicEthIf
 from intersight.model.vnic_placement_settings import VnicPlacementSettings
@@ -73,6 +79,24 @@ def get_api_client():
     except Exception as e:
         print(f"Error creating API client: {str(e)}")
         return None
+
+def get_organizations(api_client):
+    """
+    Get list of organizations from Intersight
+    """
+    try:
+        # Create API instance for organizations
+        api_instance = organization_api.OrganizationApi(api_client)
+        
+        # Get list of organizations
+        orgs = api_instance.get_organization_organization_list()
+        
+        # Extract organization names
+        org_names = [org['Name'] for org in orgs.results]
+        return org_names
+    except Exception as e:
+        print(f"Error getting organizations: {str(e)}")
+        return ['default']  # Return default as fallback
 
 def get_organizations(api_client):
     """
@@ -211,6 +235,30 @@ def format_uuid_suffix(uuid_str):
     clean_uuid = ''.join(c for c in uuid_str if c.isalnum()).zfill(16)
     return f"{clean_uuid[:4]}-{clean_uuid[4:]}"
 
+def pool_exists(api_client, pool_type, pool_name):
+    """
+    Check if a pool already exists in Intersight
+    """
+    try:
+        # Get organization MOID
+        org_moid = get_org_moid(api_client)
+        
+        # Create API instance based on pool type
+        if pool_type == "MAC Pool":
+            api_instance = macpool_api.MacpoolApi(api_client)
+            response = api_instance.get_macpool_pool_list(filter=f"Name eq '{pool_name}'")
+        elif pool_type == "UUID Pool":
+            api_instance = uuidpool_api.UuidpoolApi(api_client)
+            response = api_instance.get_uuidpool_pool_list(filter=f"Name eq '{pool_name}'")
+        else:
+            return False
+
+        return len(response.results) > 0
+
+    except Exception as e:
+        print(f"Error checking if pool exists: {str(e)}")
+        return False
+
 def create_pool(api_client, pool_data):
     """
     Create a pool in Intersight based on the provided data
@@ -219,6 +267,11 @@ def create_pool(api_client, pool_data):
     pool_name = pool_data['Name']
     
     try:
+        # Check if pool already exists
+        if pool_exists(api_client, pool_type, pool_name):
+            print(f"Pool {pool_name} already exists, skipping creation")
+            return True
+
         # Get Gruve organization MOID
         org_moid = get_org_moid(api_client, "Gruve")
         if not org_moid:
@@ -345,7 +398,7 @@ def create_policy(api_client, policy_data):
             )
             
             print("\nBIOS Policy JSON:")
-            print(json.dumps(policy.to_dict(), indent=2))  # Show the JSON being sent
+            print(json.dumps(policy.to_dict(), indent=2))
             
             result = api_instance.create_bios_policy(policy)
             print(f"Successfully created BIOS Policy: {result.name}")
@@ -354,70 +407,238 @@ def create_policy(api_client, policy_data):
         elif policy_type == 'QoS':
             api_instance = vnic_api.VnicApi(api_client)
             
-            # Create QoS policy with high priority for control plane traffic
-            policy = VnicEthQosPolicy(
-                class_id="vnic.EthQosPolicy",
-                object_type="vnic.EthQosPolicy",
-                name=policy_name,
-                organization=org_ref,
-                mtu=9000,  
-                rate_limit=0,
-                cos=5,
-                burst=1024,
-                priority="Best Effort"  # Fixed the priority value
-            )
+            # Create QoS policy
+            qos = {
+                "name": policy_name,
+                "organization": org_ref,
+                "mtu": 9000,
+                "rate_limit": 0,
+                "cos": 5,
+                "burst": 1024,
+                "priority": "Best Effort",
+                "class_id": "vnic.EthQosPolicy",
+                "object_type": "vnic.EthQosPolicy"
+            }
             
             print("\nQoS Policy JSON:")
-            print(json.dumps(policy.to_dict(), indent=2))
+            print(json.dumps(qos, indent=2))
             
-            result = api_instance.create_vnic_eth_qos_policy(policy)
+            result = api_instance.create_vnic_eth_qos_policy(qos)
             print(f"Successfully created QoS Policy: {result.name}")
             return True
             
         elif policy_type == 'vNIC':
-            return create_vnic_policy(api_client, policy_data)
+            # Create API instances
+            vnic_instance = vnic_api.VnicApi(api_client)
+            fabric_instance = fabric_api.FabricApi(api_client)
             
-        elif policy_type == 'Storage':
-            from intersight.api import storage_api
+            # Create Ethernet Adapter Policy
+            eth_adapter = {
+                "class_id": "vnic.EthAdapterPolicy",
+                "object_type": "vnic.EthAdapterPolicy",
+                "name": f"{policy_name}-eth-adapter",
+                "organization": org_ref,
+                "rss_settings": True,
+                "uplink_failback_timeout": 5,
+                "interrupt_settings": {
+                    "coalescing_time": 125,
+                    "coalescing_type": "MIN",
+                    "count": 4,
+                    "mode": "MSIx"
+                },
+                "rx_queue_settings": {
+                    "count": 1,
+                    "ring_size": 512
+                },
+                "tx_queue_settings": {
+                    "count": 1,
+                    "ring_size": 256
+                },
+                "completion_queue_settings": {
+                    "count": 2,
+                    "ring_size": 1
+                },
+                "tcp_offload_settings": {
+                    "large_receive": True,
+                    "large_send": True,
+                    "rx_checksum": True,
+                    "tx_checksum": True
+                },
+                "advanced_filter": True
+            }
             
-            try:
-                # Create Storage Policy with manual drive configuration
-                storage_policy = {
-                    "class_id": "storage.StoragePolicy",
-                    "object_type": "storage.StoragePolicy",
-                    "name": f"{policy_name}",
-                    "description": "Storage Policy for OS and ETCD",
-                    "organization": org_ref,
-                    "use_jbod_for_vd_creation": True,
-                    "unused_disks_state": "UnconfiguredGood",
-                    "m2_virtual_drive": {
-                        "enable": False
-                    },
-                    "global_hot_spares": "",
-                    "raid0_drive": {
-                        "drive_slots": "1,2",
-                        "enable": True,
-                        "virtual_drive_policy": {
-                            "access_policy": "ReadWrite",
-                            "drive_cache": "Enable",
-                            "read_policy": "ReadAhead",
-                            "strip_size": 64,
-                            "write_policy": "WriteBackGoodBbu"
-                        }
-                    }
+            print("\nEthernet Adapter Policy JSON:")
+            print(json.dumps(eth_adapter, indent=2))
+            
+            eth_adapter_result = vnic_instance.create_vnic_eth_adapter_policy(eth_adapter)
+            print(f"Successfully created Ethernet Adapter Policy: {eth_adapter_result.name}")
+
+            # Create Network Group Policies for Fabric A and B
+            network_group_a = {
+                "class_id": "fabric.EthNetworkGroupPolicy",
+                "object_type": "fabric.EthNetworkGroupPolicy",
+                "name": f"{policy_name}-network-group-A",
+                "organization": org_ref,
+                "vlan_settings": {
+                    "native_vlan": 1,
+                    "allowed_vlans": "2-100"
                 }
-                
-                storage_instance = storage_api.StorageApi(api_client)
-                storage_result = storage_instance.create_storage_storage_policy(storage_policy)
-                print(f"\nCreated Storage Policy: {storage_result.name}")
-                
-            except Exception as e:
-                print(f"Error creating Storage policy {policy_name}: {str(e)}")
-                return False
+            }
+            
+            network_group_b = {
+                "class_id": "fabric.EthNetworkGroupPolicy",
+                "object_type": "fabric.EthNetworkGroupPolicy",
+                "name": f"{policy_name}-network-group-B",
+                "organization": org_ref,
+                "vlan_settings": {
+                    "native_vlan": 1,
+                    "allowed_vlans": "2-100"
+                }
+            }
+            
+            print("\nNetwork Group Policy A JSON:")
+            print(json.dumps(network_group_a, indent=2))
+            
+            group_a_result = fabric_instance.create_fabric_eth_network_group_policy(network_group_a)
+            print(f"Successfully created Network Group Policy A: {group_a_result.name}")
+            
+            print("\nNetwork Group Policy B JSON:")
+            print(json.dumps(network_group_b, indent=2))
+            
+            group_b_result = fabric_instance.create_fabric_eth_network_group_policy(network_group_b)
+            print(f"Successfully created Network Group Policy B: {group_b_result.name}")
+
+            # Create vNIC Policy
+            lan_connectivity = {
+                "class_id": "vnic.LanConnectivityPolicy",
+                "object_type": "vnic.LanConnectivityPolicy",
+                "name": policy_name,
+                "organization": org_ref,
+                "target_platform": "FIAttached"
+            }
+            
+            print("\nvNIC LAN Connectivity Policy JSON:")
+            print(json.dumps(lan_connectivity, indent=2))
+            
+            lan_policy = vnic_instance.create_vnic_lan_connectivity_policy(lan_connectivity)
+            print(f"Successfully created vNIC LAN Connectivity Policy: {lan_policy.name}")
+
+            # Create vNIC eth0 for Fabric A
+            eth0 = {
+                "class_id": "vnic.EthIf",
+                "object_type": "vnic.EthIf",
+                "name": f"eth0_{lan_policy.name}",  # Make the name unique
+                "order": 0,
+                "placement": {
+                    "class_id": "vnic.PlacementSettings",
+                    "object_type": "vnic.PlacementSettings",
+                    "id": "MLOM",
+                    "pci_link": 0,
+                    "switch_id": "A",
+                    "uplink": 0
+                },
+                "cdn": {
+                    "class_id": "vnic.Cdn",
+                    "object_type": "vnic.Cdn",
+                    "source": "vnic",
+                    "value": "eth0"
+                },
+                "mac_address_type": "POOL",
+                "mac_pool": {
+                    "class_id": "mo.MoRef",
+                    "object_type": "macpool.Pool",
+                    "moid": get_mac_pool_moid(api_client, "MAC-Pool-A", org_moid)
+                },
+                "eth_qos_policy": {
+                    "class_id": "mo.MoRef",
+                    "object_type": "vnic.EthQosPolicy",
+                    "moid": get_policy_moid(api_client, "vnic.EthQosPolicy", "QoS-Ai_pod")
+                },
+                "eth_adapter_policy": {
+                    "class_id": "mo.MoRef",
+                    "object_type": "vnic.EthAdapterPolicy",
+                    "moid": eth_adapter_result.moid
+                },
+                "fabric_eth_network_group_policy": [{
+                    "class_id": "mo.MoRef",
+                    "object_type": "fabric.EthNetworkGroupPolicy",
+                    "moid": group_a_result.moid
+                }],
+                "lan_connectivity_policy": {
+                    "class_id": "mo.MoRef",
+                    "object_type": "vnic.LanConnectivityPolicy",
+                    "moid": lan_policy.moid
+                }
+            }
+
+            # Create vNIC eth1 for Fabric B
+            eth1 = {
+                "class_id": "vnic.EthIf",
+                "object_type": "vnic.EthIf",
+                "name": f"eth1_{lan_policy.name}",  # Make the name unique
+                "order": 1,
+                "placement": {
+                    "class_id": "vnic.PlacementSettings",
+                    "object_type": "vnic.PlacementSettings",
+                    "id": "MLOM",
+                    "pci_link": 1,  # Different PCI link for eth1
+                    "switch_id": "B",
+                    "uplink": 0
+                },
+                "cdn": {
+                    "class_id": "vnic.Cdn",
+                    "object_type": "vnic.Cdn",
+                    "source": "vnic",
+                    "value": "eth1"
+                },
+                "mac_address_type": "POOL",
+                "mac_pool": {
+                    "class_id": "mo.MoRef",
+                    "object_type": "macpool.Pool",
+                    "moid": get_mac_pool_moid(api_client, "MAC-Pool-B", org_moid)
+                },
+                "eth_qos_policy": {
+                    "class_id": "mo.MoRef",
+                    "object_type": "vnic.EthQosPolicy",
+                    "moid": get_policy_moid(api_client, "vnic.EthQosPolicy", "QoS-Ai_pod")
+                },
+                "eth_adapter_policy": {
+                    "class_id": "mo.MoRef",
+                    "object_type": "vnic.EthAdapterPolicy",
+                    "moid": eth_adapter_result.moid
+                },
+                "fabric_eth_network_group_policy": [{
+                    "class_id": "mo.MoRef",
+                    "object_type": "fabric.EthNetworkGroupPolicy",
+                    "moid": group_b_result.moid
+                }],
+                "lan_connectivity_policy": {
+                    "class_id": "mo.MoRef",
+                    "object_type": "vnic.LanConnectivityPolicy",
+                    "moid": lan_policy.moid
+                }
+            }
+
+            # Create the vNICs
+            eth0_name = f"eth0_{lan_policy.name}"
+            eth1_name = f"eth1_{lan_policy.name}"
+
+            if not check_vnic_exists(api_client, eth0_name, lan_policy.moid):
+                print("\nCreating vNIC eth0 for Fabric A...")
+                eth0_result = vnic_instance.create_vnic_eth_if(eth0)
+                print(f"Successfully created vNIC eth0 for Fabric A")
+            else:
+                print(f"\nvNIC {eth0_name} already exists, skipping creation")
+
+            if not check_vnic_exists(api_client, eth1_name, lan_policy.moid):
+                print("\nCreating vNIC eth1 for Fabric B...")
+                eth1_result = vnic_instance.create_vnic_eth_if(eth1)
+                print(f"Successfully created vNIC eth1 for Fabric B")
+            else:
+                print(f"\nvNIC {eth1_name} already exists, skipping creation")
+            
             return True
             
-        # Other policy types will go here...
-        
     except Exception as e:
         print(f"Error creating {policy_type} policy {policy_name}: {str(e)}")
         return False
@@ -428,7 +649,8 @@ def create_vnic_policy(api_client, policy_data):
     """
     try:
         # Get organization MOID
-        org_moid = get_org_moid(api_client, "Gruve")
+        org_name = policy_data['Organization'] if pd.notna(policy_data['Organization']) else "default"
+        org_moid = get_org_moid(api_client, org_name)
         if not org_moid:
             print("Error: Organization not found")
             return False
@@ -460,14 +682,15 @@ def create_vnic_policy(api_client, policy_data):
         eth0 = {
             "class_id": "vnic.EthIf",
             "object_type": "vnic.EthIf",
-            "name": "eth0-A",
+            "name": f"eth0_{lan_policy.name}",  # Make the name unique
             "order": 0,
             "placement": {
                 "class_id": "vnic.PlacementSettings",
                 "object_type": "vnic.PlacementSettings",
                 "id": "MLOM",
-                "pci_link": 0,  
-                "switch_id": "A"
+                "pci_link": 0,
+                "switch_id": "A",
+                "uplink": 0
             },
             "cdn": {
                 "class_id": "vnic.Cdn",
@@ -477,18 +700,18 @@ def create_vnic_policy(api_client, policy_data):
             "eth_adapter_policy": {
                 "class_id": "mo.MoRef",
                 "object_type": "vnic.EthAdapterPolicy",
-                "moid": get_policy_moid(api_client, "vnic.EthAdapterPolicy", "vNIC-Default-eth-adapter")
+                "moid": get_policy_moid(api_client, "vnic.EthAdapterPolicy", f"{policy_data['Name']}-eth-adapter")
             },
             "eth_qos_policy": {
                 "class_id": "mo.MoRef",
                 "object_type": "vnic.EthQosPolicy",
-                "moid": get_policy_moid(api_client, "vnic.EthQosPolicy", "vNIC-Default-qos")
+                "moid": get_policy_moid(api_client, "vnic.EthQosPolicy", policy_data['Name'])
             },
             "fabric_eth_network_group_policy": [
                 {
                     "class_id": "mo.MoRef",
                     "object_type": "fabric.EthNetworkGroupPolicy",
-                    "moid": get_policy_moid(api_client, "fabric.EthNetworkGroupPolicy", "vNIC-Default-network-group-A")
+                    "moid": get_policy_moid(api_client, "fabric.EthNetworkGroupPolicy", f"{policy_data['Name']}-network-group-A")
                 }
             ],
             "lan_connectivity_policy": {
@@ -502,25 +725,20 @@ def create_vnic_policy(api_client, policy_data):
                 "moid": get_mac_pool_moid(api_client, "MAC-Pool-A", org_moid)
             }
         }
-        
-        eth0_if = vnic_instance.create_vnic_eth_if(eth0)
-        print(f"\nCreated vNIC eth0 for Fabric A")
 
-        # Add another small delay before creating the second vNIC
-        time.sleep(2)
-
-        # Create vNIC eth0 for Fabric B
+        # Create vNIC eth1 for Fabric B
         eth1 = {
             "class_id": "vnic.EthIf",
             "object_type": "vnic.EthIf",
-            "name": "eth0-B",
+            "name": f"eth1_{lan_policy.name}",  # Make the name unique
             "order": 1,
             "placement": {
                 "class_id": "vnic.PlacementSettings",
                 "object_type": "vnic.PlacementSettings",
                 "id": "MLOM",
-                "pci_link": 1,  
-                "switch_id": "B"
+                "pci_link": 1,  # Different PCI link for eth1
+                "switch_id": "B",
+                "uplink": 0
             },
             "cdn": {
                 "class_id": "vnic.Cdn",
@@ -530,18 +748,18 @@ def create_vnic_policy(api_client, policy_data):
             "eth_adapter_policy": {
                 "class_id": "mo.MoRef",
                 "object_type": "vnic.EthAdapterPolicy",
-                "moid": get_policy_moid(api_client, "vnic.EthAdapterPolicy", "vNIC-Default-eth-adapter")
+                "moid": get_policy_moid(api_client, "vnic.EthAdapterPolicy", f"{policy_data['Name']}-eth-adapter")
             },
             "eth_qos_policy": {
                 "class_id": "mo.MoRef",
                 "object_type": "vnic.EthQosPolicy",
-                "moid": get_policy_moid(api_client, "vnic.EthQosPolicy", "vNIC-Default-qos")
+                "moid": get_policy_moid(api_client, "vnic.EthQosPolicy", policy_data['Name'])
             },
             "fabric_eth_network_group_policy": [
                 {
                     "class_id": "mo.MoRef",
                     "object_type": "fabric.EthNetworkGroupPolicy",
-                    "moid": get_policy_moid(api_client, "fabric.EthNetworkGroupPolicy", "vNIC-Default-network-group-B")
+                    "moid": get_policy_moid(api_client, "fabric.EthNetworkGroupPolicy", f"{policy_data['Name']}-network-group-B")
                 }
             ],
             "lan_connectivity_policy": {
@@ -555,22 +773,30 @@ def create_vnic_policy(api_client, policy_data):
                 "moid": get_mac_pool_moid(api_client, "MAC-Pool-B", org_moid)
             }
         }
-        
-        eth1_if = vnic_instance.create_vnic_eth_if(eth1)
-        print(f"\nCreated vNIC eth0 for Fabric B")
+
+        # Create the vNICs
+        eth0_name = f"eth0_{lan_policy.name}"
+        eth1_name = f"eth1_{lan_policy.name}"
+
+        if not check_vnic_exists(api_client, eth0_name, lan_policy.moid):
+            print("\nCreating vNIC eth0 for Fabric A...")
+            eth0_result = vnic_instance.create_vnic_eth_if(eth0)
+            print(f"Successfully created vNIC eth0 for Fabric A")
+        else:
+            print(f"\nvNIC {eth0_name} already exists, skipping creation")
+
+        if not check_vnic_exists(api_client, eth1_name, lan_policy.moid):
+            print("\nCreating vNIC eth1 for Fabric B...")
+            eth1_result = vnic_instance.create_vnic_eth_if(eth1)
+            print(f"Successfully created vNIC eth1 for Fabric B")
+        else:
+            print(f"\nvNIC {eth1_name} already exists, skipping creation")
 
         print("\nUpdated LAN Connectivity Policy with vNIC references")
         return True
 
     except Exception as e:
         print(f"Error creating vNIC policy {policy_data['Name']}: {str(e)}")
-        if hasattr(e, 'status') and hasattr(e, 'reason'):
-            print(f"Status Code: {e.status}")
-            print(f"Reason: {e.reason}")
-        if hasattr(e, 'headers'):
-            print(f"HTTP response headers: {e.headers}")
-        if hasattr(e, 'body'):
-            print(f"HTTP response body: {e.body}")
         return False
 
 def get_mac_pool_moid(api_client, pool_name, org_moid):
@@ -601,260 +827,363 @@ def get_pool_moid(api_client, pool_name):
         raise Exception(f"Pool '{pool_name}' not found")
 
 def get_policy_moid(api_client, policy_type, policy_name):
+    """Get the MOID of a policy by name"""
+    try:
+        if policy_type == "bios/Policies":
+            api_instance = bios_api.BiosApi(api_client)
+            policies = api_instance.get_bios_policy_list()
+        elif policy_type == "vnic/LanConnectivityPolicies":
+            api_instance = vnic_api.VnicApi(api_client)
+            policies = api_instance.get_vnic_lan_connectivity_policy_list()
+        elif policy_type == "vnic.EthQosPolicy":
+            api_instance = vnic_api.VnicApi(api_client)
+            policies = api_instance.get_vnic_eth_qos_policy_list()
+        elif policy_type == "storage.StoragePolicy":
+            api_instance = storage_api.StorageApi(api_client)
+            policies = api_instance.get_storage_storage_policy_list()
+        elif policy_type == "macpool.Pool":
+            api_instance = macpool_api.MacpoolApi(api_client)
+            policies = api_instance.get_macpool_pool_list()
+        else:
+            raise Exception(f"Unsupported policy type: {policy_type}")
+        
+        # Find the policy by name
+        for policy in policies.results:
+            if policy.name == policy_name:
+                return policy.moid
+                
+        print(f"Policy {policy_name} not found")
+        return None
+        
+    except Exception as e:
+        print(f"Error getting policy MOID: {str(e)}")
+        return None
+
+def policy_exists(api_client, policy_type, policy_name):
     """
-    Get the MOID of a policy by name and type
+    Check if a policy already exists in Intersight
     """
-    # Create the appropriate API instance based on policy type
-    if policy_type == "vnic.EthAdapterPolicy":
-        api_instance = vnic_api.VnicApi(api_client)
-        policies = api_instance.get_vnic_eth_adapter_policy_list()
-    elif policy_type == "vnic.EthQosPolicy":
-        api_instance = vnic_api.VnicApi(api_client)
-        policies = api_instance.get_vnic_eth_qos_policy_list()
-    elif policy_type == "fabric.EthNetworkControlPolicy":
-        api_instance = fabric_api.FabricApi(api_client)
-        policies = api_instance.get_fabric_eth_network_control_policy_list()
-    elif policy_type == "fabric.EthNetworkGroupPolicy":
-        api_instance = fabric_api.FabricApi(api_client)
-        policies = api_instance.get_fabric_eth_network_group_policy_list()
-    elif policy_type == "macpool.Pool":
-        api_instance = macpool_api.MacpoolApi(api_client)
-        policies = api_instance.get_macpool_pool_list()
-    else:
-        raise Exception(f"Unsupported policy type: {policy_type}")
-    
-    # Search for the policy by name
-    for policy in policies.results:
-        if policy.name == policy_name:
-            return policy.moid
-    
-    print(f"Warning: Policy '{policy_name}' of type '{policy_type}' not found")
-    return None
+    try:
+        # Get organization MOID
+        org_moid = get_org_moid(api_client)
+        
+        # Create API instance based on policy type
+        if policy_type == "bios.Policy":
+            api_instance = bios_api.BiosApi(api_client)
+            response = api_instance.get_bios_policy_list(filter=f"Name eq '{policy_name}'")
+        elif policy_type == "vnic.EthQosPolicy":
+            api_instance = vnic_api.VnicApi(api_client)
+            response = api_instance.get_vnic_eth_qos_policy_list(filter=f"Name eq '{policy_name}'")
+        elif policy_type == "vnic.EthAdapterPolicy":
+            api_instance = vnic_api.VnicApi(api_client)
+            response = api_instance.get_vnic_eth_adapter_policy_list(filter=f"Name eq '{policy_name}'")
+        elif policy_type == "fabric.EthNetworkGroupPolicy":
+            api_instance = fabric_api.FabricApi(api_client)
+            response = api_instance.get_fabric_eth_network_group_policy_list(filter=f"Name eq '{policy_name}'")
+        elif policy_type == "vnic.LanConnectivityPolicy":
+            api_instance = vnic_api.VnicApi(api_client)
+            response = api_instance.get_vnic_lan_connectivity_policy_list(filter=f"Name eq '{policy_name}'")
+        else:
+            return False
+
+        return len(response.results) > 0
+
+    except Exception as e:
+        print(f"Error checking if policy exists: {str(e)}")
+        return False
+
+def check_vnic_exists(api_client, vnic_name, lan_connectivity_moid):
+    """
+    Check if a vNIC already exists in the LAN Connectivity Policy
+    """
+    try:
+        vnic_instance = vnic_api.VnicApi(api_client)
+        vnic_list = vnic_instance.get_vnic_eth_if_list(filter=f"Name eq '{vnic_name}'")
+        for vnic in vnic_list.results:
+            if hasattr(vnic, 'lan_connectivity_policy') and vnic.lan_connectivity_policy.moid == lan_connectivity_moid:
+                return True
+        return False
+    except Exception as e:
+        print(f"Error checking vNIC existence: {str(e)}")
+        return False
 
 def process_foundation_template(excel_file):
     """
     Read the Excel template and create pools and policies in Intersight
     """
     try:
+        # Read Excel file
+        df = pd.read_excel(excel_file, sheet_name=None)
+        
         # Get API client
         api_client = get_api_client()
-        
-        # Read Excel file
-        pools_df = pd.read_excel(excel_file, sheet_name='Pools')
-        policies_df = pd.read_excel(excel_file, sheet_name='Policies')
-        
-        # Process pools
-        for _, pool in pools_df.iterrows():
-            if pd.notna(pool['Name']):  # Only process rows with a name
-                create_pool(api_client, pool)
-        
-        # Process policies
-        for _, policy in policies_df.iterrows():
-            if pd.notna(policy['Name']):  # Only process rows with a name
-                create_policy(api_client, policy)
+        if not api_client:
+            return False
+            
+        # Process Pools sheet
+        if 'Pools' in df:
+            pools_df = df['Pools']
+            for _, row in pools_df.iterrows():
+                create_pool(api_client, row)
                 
+        # Process Policies sheet in specific order
+        if 'Policies' in df:
+            policies_df = df['Policies']
+            
+            # Create policies in order: BIOS, QoS, vNIC, Storage
+            policy_order = ['BIOS', 'QoS', 'vNIC', 'Storage']
+            
+            for policy_type in policy_order:
+                policy_rows = policies_df[policies_df['Policy Type'] == policy_type]
+                for _, row in policy_rows.iterrows():
+                    if policy_exists(api_client, get_policy_class_id(policy_type), row['Name']):
+                        print(f"Policy {row['Name']} already exists, skipping creation")
+                    else:
+                        create_policy(api_client, row)
+                    
         print("Completed processing the Foundation template")
+        return True
         
     except Exception as e:
-        print(f"Error processing template: {str(e)}")
+        print(f"Error processing Foundation template: {str(e)}")
+        return False
 
-if __name__ == "__main__":
-    import argparse
-    
-    # Create argument parser
-    parser = argparse.ArgumentParser(description='Intersight Foundation Template Tool')
-    parser.add_argument('--action', choices=['create', 'push'], required=True,
-                      help='Action to perform: "create" to generate Excel template, "push" to push template to Intersight')
-    parser.add_argument('--file', help='Excel file to push to Intersight (required for push action)',
-                      default='output/Intersight_Foundation.xlsx')
-    
-    args = parser.parse_args()
-    
-    if args.action == 'create':
-        # Create output directory if it doesn't exist
-        os.makedirs('output', exist_ok=True)
+def create_and_push_configuration(api_client, excel_file):
+    """
+    Read the Excel template and create pools and policies in Intersight
+    """
+    try:
+        # Read Excel file
+        df = pd.read_excel(excel_file, sheet_name=None)
         
-        # Create Excel writer
-        writer = pd.ExcelWriter(args.file, engine='openpyxl')
+        # Process Pools sheet
+        if 'Pools' in df:
+            pools_df = df['Pools']
+            for _, row in pools_df.iterrows():
+                create_pool(api_client, row)
+                
+        # Process Policies sheet in specific order
+        if 'Policies' in df:
+            policies_df = df['Policies']
+            
+            # Create policies in order: BIOS, QoS, vNIC, Storage
+            policy_order = ['BIOS', 'QoS', 'vNIC', 'Storage']
+            
+            for policy_type in policy_order:
+                policy_rows = policies_df[policies_df['Policy Type'] == policy_type]
+                for _, row in policy_rows.iterrows():
+                    if policy_exists(api_client, get_policy_class_id(policy_type), row['Name']):
+                        print(f"Policy {row['Name']} already exists, skipping creation")
+                    else:
+                        create_policy(api_client, row)
+                    
+        print("Completed processing the Foundation template")
+        return True
+        
+    except Exception as e:
+        print(f"Error processing Foundation template: {str(e)}")
+        return False
+
+def get_policy_class_id(policy_type):
+    policy_class_ids = {
+        'BIOS': 'bios/Policies',
+        'QoS': 'vnic.EthQosPolicy',
+        'vNIC': 'vnic/LanConnectivityPolicies',
+        'Storage': 'storage.StoragePolicy'
+    }
+    return policy_class_ids.get(policy_type, None)
+
+def add_template_sheet(excel_file, api_client):
+    """Add a template sheet to the existing Excel file with consistent formatting"""
+    try:
+        # First, read the Pools sheet to get the exact color
+        workbook = load_workbook(excel_file)
+        pools_sheet = workbook['Pools']
+        header_cell = pools_sheet['A1']
+        header_color = header_cell.fill.start_color.rgb
         
         # Get organizations from Intersight
-        api_client = get_api_client()
         organizations = get_organizations(api_client)
-        organizations_str = ','.join(organizations) if organizations else "default"
         
-        # Pools Sheet Data
-        pools_data = {
-            'Pool Type': [
-                'MAC Pool',
-                'MAC Pool',
-                'UUID Pool'
-            ],
-            'Name': [
-                'MAC-Pool-A',
-                'MAC-Pool-B',
-                'UUID-Pool'
-            ],
-            'Description': [
-                'MAC Pool for Fabric A',
-                'MAC Pool for Fabric B',
-                'UUID Pool for UCS Servers'
-            ],
-            'Organization': ['default'] * 3,
-            'Assignment Order': ['sequential'] * 3,
-            'ID Blocks': [
-                '00:25:B5:A1:00:00-00:25:B5:A1:00:FF',  
-                '00:25:B5:A2:00:00-00:25:B5:A2:00:FF',  
-                '0000-000000000010'  
-            ],
-            'First Address': [
-                '', '', ''
-            ],
-            'Size': [
-                '', '', ''
-            ]
-        }
+        # Create a list of rows for the template
+        data = [
+            ['Configuration Type', 'Value', 'Description'],
+            ['Template Name', 'Ai_Pod_Template', 'Name of the server profile template'],
+            ['Template Description', 'Server template for AI Pod configuration', 'Description of the template'],
+            ['Organization', organizations[0] if organizations else 'default', 'Organization to create the template in'],
+            ['BIOS Policy', 'BIOS-Ai_pod', 'BIOS policy to use for server configuration'],
+            ['UUID Pool', 'UUID-Pool', 'UUID pool for server identification'],
+            ['LAN Connectivity Policy', 'vNIC-Ai_pod', 'LAN connectivity policy for network configuration'],
+            ['QoS Policy', 'QoS-Ai_pod', 'Quality of Service policy for network traffic']
+        ]
 
-        # Policies Sheet Data
-        policies_data = {
-            'Policy Type': [
-                'BIOS',
-                'QoS',
-                'vNIC',
-                'Storage'
-            ],
-            'Name': [
-                'BIOS-Default',
-                'QoS-Default',
-                'vNIC-Default',
-                'Storage-Default'
-            ],
-            'Description': [
-                'Default BIOS policy',
-                'Default QoS policy',
-                'Default vNIC policy',
-                'Default Storage policy'
-            ],
-            'Organization': ['default'] * 4,
-            'MAC Pool A': ['MAC-Pool-A'] * 4,
-            'MAC Pool B': ['MAC-Pool-B'] * 4,
-            'WWNN Pool': [''] * 4,
-            'WWPN Pool A': [''] * 4,
-            'WWPN Pool B': [''] * 4
-        }
-
-        # Create DataFrames
-        pools_df = pd.DataFrame(pools_data)
-        policies_df = pd.DataFrame(policies_data)
-
-        # Write DataFrames to Excel
-        pools_df.to_excel(writer, sheet_name='Pools', index=False)
-        policies_df.to_excel(writer, sheet_name='Policies', index=False)
-
-        # Get workbook and sheets
-        workbook = writer.book
-        pools_sheet = writer.sheets['Pools']
-        policies_sheet = writer.sheets['Policies']
-
-        # Define styles
-        header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
-        header_font = Font(bold=True, color='FFFFFF')
-        border = Border(
+        # Remove existing Template sheet if it exists
+        if 'Template' in workbook.sheetnames:
+            del workbook['Template']
+        
+        # Create new Template sheet
+        worksheet = workbook.create_sheet('Template')
+        
+        # Write data to worksheet
+        for row in data:
+            worksheet.append(row)
+        
+        # Define styles - using the exact color from Pools sheet
+        header_fill = PatternFill(start_color=header_color[2:], end_color=header_color[2:], fill_type='solid')  # Remove 'FF' prefix from RGB
+        header_font = Font(color='FFFFFF', bold=True)
+        cell_border = Border(
             left=Side(style='thin'),
             right=Side(style='thin'),
             top=Side(style='thin'),
             bottom=Side(style='thin')
         )
-
-        # Apply styles to Pools sheet
-        for col in range(1, len(pools_data.keys()) + 1):
-            cell = pools_sheet.cell(row=1, column=col)
+        
+        # Apply header formatting
+        for cell in worksheet[1]:
             cell.fill = header_fill
             cell.font = header_font
-            column_letter = get_column_letter(col)
-            pools_sheet.column_dimensions[column_letter].width = 20
-
-        # Apply styles to Policies sheet
-        for col in range(1, len(policies_data.keys()) + 1):
-            cell = policies_sheet.cell(row=1, column=col)
-            cell.fill = header_fill
-            cell.font = header_font
-            column_letter = get_column_letter(col)
-            policies_sheet.column_dimensions[column_letter].width = 20
-
-        # Add data validation for Organizations in Pools sheet
-        org_dv = DataValidation(
-            type="list",
-            formula1=f'"{organizations_str}"',
-            allow_blank=True
-        )
-        pools_sheet.add_data_validation(org_dv)
-        for row in range(2, 50):
-            org_dv.add(f'D{row}')
-
-        # Add data validation for Organizations in Policies sheet
-        policies_org_dv = DataValidation(
-            type="list",
-            formula1=f'"{organizations_str}"',
-            allow_blank=True
-        )
-        policies_sheet.add_data_validation(policies_org_dv)
-        for row in range(2, 50):
-            policies_org_dv.add(f'D{row}')
-
-        # Add data validation for Pool Type
-        pool_type_dv = DataValidation(
-            type="list",
-            formula1='"MAC Pool,UUID Pool"',
-            allow_blank=True
-        )
-        pools_sheet.add_data_validation(pool_type_dv)
-        for row in range(2, 50):
-            pool_type_dv.add(f'A{row}')
-
-        # Add data validation for Assignment Order
-        assignment_order_dv = DataValidation(
-            type="list",
-            formula1='"SEQUENTIAL,RANDOM"',
-            allow_blank=True
-        )
-        pools_sheet.add_data_validation(assignment_order_dv)
-        for row in range(2, 50):
-            assignment_order_dv.add(f'E{row}')
-
-        # Add data validation for Policy Type
-        policy_type_dv = DataValidation(
-            type="list",
-            formula1='"BIOS,QoS,vNIC,Storage"',
-            allow_blank=True
-        )
-        policies_sheet.add_data_validation(policy_type_dv)
-        for row in range(2, 50):
-            policy_type_dv.add(f'A{row}')
-
-        # Add data validation for MAC Pool A and B
-        mac_pool_dv = DataValidation(
-            type="list",
-            formula1='"MAC-Pool-A,MAC-Pool-B"',
-            allow_blank=True
-        )
-        policies_sheet.add_data_validation(mac_pool_dv)
-        for row in range(2, 50):
-            mac_pool_dv.add(f'E{row}')  # MAC Pool A
-            mac_pool_dv.add(f'F{row}')  # MAC Pool B
-
-        # Save the workbook
-        writer.close()
-        
-        print(f"\nExcel template has been created at: {args.file}")
-        print("The template includes organization dropdowns in both sheets.")
-        print("When you select an organization in column D, all rows will show the same options.")
-        print("\nWhen ready to push to Intersight, run:")
-        print(f"python3 {sys.argv[0]} --action push --file {args.file}")
-        
-    elif args.action == 'push':
-        if not os.path.exists(args.file):
-            print(f"Error: Excel file not found: {args.file}")
-            sys.exit(1)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = cell_border
             
+        # Apply cell formatting to all cells
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.border = cell_border
+                cell.alignment = Alignment(horizontal='left', vertical='center')
+                
+        # Adjust column widths
+        for column in worksheet.columns:
+            max_length = 0
+            column_letter = get_column_letter(column[0].column)
+            
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            
+            adjusted_width = (max_length + 2)
+            worksheet.column_dimensions[column_letter].width = adjusted_width
+        
+        # Add data validation for Organization with actual organizations from Intersight
+        org_validation = DataValidation(
+            type='list',
+            formula1=f'"{",".join(organizations)}"',
+            allow_blank=True
+        )
+        worksheet.add_data_validation(org_validation)
+        org_row = [i+1 for i, row in enumerate(data) if row[0] == 'Organization'][0]
+        org_validation.add(f'B{org_row}')
+        
+        # Add data validation for policies
+        try:
+            policies_df = pd.read_excel(excel_file, sheet_name='Policies')
+            for policy_type in ['BIOS Policy', 'UUID Pool', 'LAN Connectivity Policy', 'QoS Policy']:
+                row_num = [i+1 for i, row in enumerate(data) if row[0] == policy_type][0]
+                if policy_type == 'UUID Pool':
+                    validation = DataValidation(
+                        type='list',
+                        formula1='"UUID-Pool"',
+                        allow_blank=True
+                    )
+                else:
+                    policy_name = policy_type.split()[0]
+                    policy_values = policies_df[policies_df['Policy Type'] == policy_name]['Name'].tolist()
+                    if policy_values:
+                        validation = DataValidation(
+                            type='list',
+                            formula1=f'"{",".join(policy_values)}"',
+                            allow_blank=True
+                        )
+                    else:
+                        continue
+                        
+                worksheet.add_data_validation(validation)
+                validation.add(f'B{row_num}')
+        except Exception as e:
+            print(f"Warning: Could not add policy validations: {str(e)}")
+        
+        # Save the workbook
+        workbook.save(excel_file)
+        print(f"\nUpdated Template sheet with organizations: {organizations}")
+        return True
+        
+    except Exception as e:
+        print(f"Error adding template sheet: {str(e)}")
+        return False
+
+def create_server_template_from_excel(api_client, excel_file):
+    """Create a server template in Intersight from Excel configuration"""
+    try:
+        # Read the template sheet
+        template_df = pd.read_excel(excel_file, sheet_name='Template')
+        template_data = dict(zip(template_df['Configuration Type'], template_df['Value']))
+        
+        # Get organization MOID
+        org_moid = get_org_moid(api_client)
+        
+        # Create Server Profile Template API instance
+        api_instance = server_api.ServerApi(api_client)
+        
+        # Get policy MOIDs
+        bios_policy_moid = get_policy_moid(api_client, 'bios/Policies', template_data.get('BIOS Policy', ''))
+        lan_policy_moid = get_policy_moid(api_client, 'vnic/LanConnectivityPolicies', template_data.get('LAN Connectivity Policy', ''))
+        
+        # Create the template body
+        template_body = {
+            'Name': template_data.get('Template Name', ''),
+            'Description': template_data.get('Template Description', ''),
+            'Organization': {
+                'ObjectType': 'organization.Organization',
+                'Moid': org_moid
+            },
+            'TargetPlatform': 'FIAttached',
+            'PolicyBucket': []
+        }
+        
+        # Add policies to the template
+        if bios_policy_moid:
+            template_body['PolicyBucket'].append({
+                'ObjectType': 'bios.Policy',
+                'Moid': bios_policy_moid
+            })
+            
+        if lan_policy_moid:
+            template_body['PolicyBucket'].append({
+                'ObjectType': 'vnic.LanConnectivityPolicy',
+                'Moid': lan_policy_moid
+            })
+            
+        # Create the template
+        print(f"\nCreating server template '{template_data.get('Template Name', '')}'...")
+        api_instance.create_server_profile_template(template_body)
+        print(f"Successfully created server template: {template_data.get('Template Name', '')}")
+        return True
+        
+    except Exception as e:
+        print(f"Error creating server template: {str(e)}")
+        return False
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Create and push Intersight Foundation configuration')
+    parser.add_argument('--action', choices=['push', 'template', 'both'], required=True,
+                      help='Action to perform: push (create policies), template (apply template), or both')
+    parser.add_argument('--file', required=True, help='Path to the Excel file')
+    args = parser.parse_args()
+
+    # Get API client
+    api_client = get_api_client()
+    if not api_client:
+        sys.exit(1)
+
+    if args.action in ['push', 'both']:
         print(f"Pushing configuration from {args.file} to Intersight...")
-        process_foundation_template(args.file)
+        create_and_push_configuration(api_client, args.file)
+
+    if args.action in ['template', 'both']:
+        print(f"\nApplying template configuration from {args.file}...")
+        add_template_sheet(args.file, api_client)
+        
+        # Create the server template in Intersight
+        create_server_template_from_excel(api_client, args.file)
