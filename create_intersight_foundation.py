@@ -32,6 +32,8 @@ from intersight.model.bios_policy import BiosPolicy
 from intersight.model.mo_mo_ref import MoMoRef
 from intersight.model.boot_precision_policy import BootPrecisionPolicy
 import time
+import argparse
+import sys
 
 def get_api_client():
     """
@@ -77,16 +79,21 @@ def get_organizations(api_client):
     Get list of organizations from Intersight
     """
     if not api_client:
+        print("Debug: No API client available, defaulting to 'default' organization")
         return ["default"]
         
     try:
         # Import here to avoid circular imports
         from intersight.api import organization_api
         org_api = organization_api.OrganizationApi(api_client)
+        print("Debug: Successfully created organization API client")
+        
         orgs = org_api.get_organization_organization_list()
+        print(f"Debug: Found organizations: {[org.name for org in orgs.results]}")
+        
         return [org.name for org in orgs.results] if orgs.results else ["default"]
     except Exception as e:
-        print(f"Error fetching organizations: {str(e)}")
+        print(f"Debug: Error fetching organizations: {str(e)}")
         return ["default"]
 
 def create_mac_pool(api_client, pool_data):
@@ -453,14 +460,13 @@ def create_vnic_policy(api_client, policy_data):
         eth0 = {
             "class_id": "vnic.EthIf",
             "object_type": "vnic.EthIf",
-            "name": "eth0",
+            "name": "eth0-A",
             "order": 0,
             "placement": {
                 "class_id": "vnic.PlacementSettings",
                 "object_type": "vnic.PlacementSettings",
-                "id": "1",
-                "pci_link": 0,
-                "uplink": 0,
+                "id": "MLOM",
+                "pci_link": 0,  
                 "switch_id": "A"
             },
             "cdn": {
@@ -478,11 +484,13 @@ def create_vnic_policy(api_client, policy_data):
                 "object_type": "vnic.EthQosPolicy",
                 "moid": get_policy_moid(api_client, "vnic.EthQosPolicy", "vNIC-Default-qos")
             },
-            "fabric_eth_network_group_policy": {
-                "class_id": "mo.MoRef",
-                "object_type": "fabric.EthNetworkGroupPolicy",
-                "moid": get_policy_moid(api_client, "fabric.EthNetworkGroupPolicy", "vNIC-Default-network-group-A")
-            },
+            "fabric_eth_network_group_policy": [
+                {
+                    "class_id": "mo.MoRef",
+                    "object_type": "fabric.EthNetworkGroupPolicy",
+                    "moid": get_policy_moid(api_client, "fabric.EthNetworkGroupPolicy", "vNIC-Default-network-group-A")
+                }
+            ],
             "lan_connectivity_policy": {
                 "class_id": "mo.MoRef",
                 "object_type": "vnic.LanConnectivityPolicy",
@@ -491,7 +499,7 @@ def create_vnic_policy(api_client, policy_data):
             "mac_pool": {
                 "class_id": "mo.MoRef",
                 "object_type": "macpool.Pool",
-                "moid": get_policy_moid(api_client, "macpool.Pool", "MAC-Pool-A")
+                "moid": get_mac_pool_moid(api_client, "MAC-Pool-A", org_moid)
             }
         }
         
@@ -501,18 +509,17 @@ def create_vnic_policy(api_client, policy_data):
         # Add another small delay before creating the second vNIC
         time.sleep(2)
 
-        # Create vNIC eth1 for Fabric B
+        # Create vNIC eth0 for Fabric B
         eth1 = {
             "class_id": "vnic.EthIf",
             "object_type": "vnic.EthIf",
-            "name": "eth1",
+            "name": "eth0-B",
             "order": 1,
             "placement": {
                 "class_id": "vnic.PlacementSettings",
                 "object_type": "vnic.PlacementSettings",
-                "id": "2",
-                "pci_link": 0,
-                "uplink": 0,
+                "id": "MLOM",
+                "pci_link": 1,  
                 "switch_id": "B"
             },
             "cdn": {
@@ -530,11 +537,13 @@ def create_vnic_policy(api_client, policy_data):
                 "object_type": "vnic.EthQosPolicy",
                 "moid": get_policy_moid(api_client, "vnic.EthQosPolicy", "vNIC-Default-qos")
             },
-            "fabric_eth_network_group_policy": {
-                "class_id": "mo.MoRef",
-                "object_type": "fabric.EthNetworkGroupPolicy",
-                "moid": get_policy_moid(api_client, "fabric.EthNetworkGroupPolicy", "vNIC-Default-network-group-B")
-            },
+            "fabric_eth_network_group_policy": [
+                {
+                    "class_id": "mo.MoRef",
+                    "object_type": "fabric.EthNetworkGroupPolicy",
+                    "moid": get_policy_moid(api_client, "fabric.EthNetworkGroupPolicy", "vNIC-Default-network-group-B")
+                }
+            ],
             "lan_connectivity_policy": {
                 "class_id": "mo.MoRef",
                 "object_type": "vnic.LanConnectivityPolicy",
@@ -543,12 +552,12 @@ def create_vnic_policy(api_client, policy_data):
             "mac_pool": {
                 "class_id": "mo.MoRef",
                 "object_type": "macpool.Pool",
-                "moid": get_policy_moid(api_client, "macpool.Pool", "MAC-Pool-B")
+                "moid": get_mac_pool_moid(api_client, "MAC-Pool-B", org_moid)
             }
         }
         
         eth1_if = vnic_instance.create_vnic_eth_if(eth1)
-        print(f"\nCreated vNIC eth1 for Fabric B")
+        print(f"\nCreated vNIC eth0 for Fabric B")
 
         print("\nUpdated LAN Connectivity Policy with vNIC references")
         return True
@@ -649,430 +658,203 @@ def process_foundation_template(excel_file):
     except Exception as e:
         print(f"Error processing template: {str(e)}")
 
-def create_foundation_template():
-    """
-    Create an Excel template for Intersight Foundation configuration
-    """
-    # Create a new workbook
-    wb = load_workbook()
+if __name__ == "__main__":
+    import argparse
     
-    # Define styles
-    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")  # Dark blue
-    header_font = Font(name='Calibri', size=11, bold=True, color="FFFFFF")  # White text
-    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    thin_border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
+    # Create argument parser
+    parser = argparse.ArgumentParser(description='Intersight Foundation Template Tool')
+    parser.add_argument('--action', choices=['create', 'push'], required=True,
+                      help='Action to perform: "create" to generate Excel template, "push" to push template to Intersight')
+    parser.add_argument('--file', help='Excel file to push to Intersight (required for push action)',
+                      default='output/Intersight_Foundation.xlsx')
     
-    # Create sheets and apply styling
-    sheets_config = {
-        "Pools": ["Pool Type", "Name", "Description", "Organization", "Assignment Order", "ID Blocks", "First Address", "Size"],
-        "Policies": ["Policy Type", "Name", "Description", "Organization", "MAC Pool A", "MAC Pool B", "WWNN Pool", "WWPN Pool A", "WWPN Pool B"]
-    }
+    args = parser.parse_args()
     
-    # Create and style each sheet
-    for sheet_name, headers in sheets_config.items():
-        if sheet_name == "Pools":
-            ws = wb.active
-            ws.title = sheet_name
-        else:
-            ws = wb.create_sheet(sheet_name)
-            
-        # Apply headers and styling
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=header)
+    if args.action == 'create':
+        # Create output directory if it doesn't exist
+        os.makedirs('output', exist_ok=True)
+        
+        # Create Excel writer
+        writer = pd.ExcelWriter(args.file, engine='openpyxl')
+        
+        # Get organizations from Intersight
+        api_client = get_api_client()
+        organizations = get_organizations(api_client)
+        organizations_str = ','.join(organizations) if organizations else "default"
+        
+        # Pools Sheet Data
+        pools_data = {
+            'Pool Type': [
+                'MAC Pool',
+                'MAC Pool',
+                'UUID Pool'
+            ],
+            'Name': [
+                'MAC-Pool-A',
+                'MAC-Pool-B',
+                'UUID-Pool'
+            ],
+            'Description': [
+                'MAC Pool for Fabric A',
+                'MAC Pool for Fabric B',
+                'UUID Pool for UCS Servers'
+            ],
+            'Organization': ['default'] * 3,
+            'Assignment Order': ['sequential'] * 3,
+            'ID Blocks': [
+                '00:25:B5:A1:00:00-00:25:B5:A1:00:FF',  
+                '00:25:B5:A2:00:00-00:25:B5:A2:00:FF',  
+                '0000-000000000010'  
+            ],
+            'First Address': [
+                '', '', ''
+            ],
+            'Size': [
+                '', '', ''
+            ]
+        }
+
+        # Policies Sheet Data
+        policies_data = {
+            'Policy Type': [
+                'BIOS',
+                'QoS',
+                'vNIC',
+                'Storage'
+            ],
+            'Name': [
+                'BIOS-Default',
+                'QoS-Default',
+                'vNIC-Default',
+                'Storage-Default'
+            ],
+            'Description': [
+                'Default BIOS policy',
+                'Default QoS policy',
+                'Default vNIC policy',
+                'Default Storage policy'
+            ],
+            'Organization': ['default'] * 4,
+            'MAC Pool A': ['MAC-Pool-A'] * 4,
+            'MAC Pool B': ['MAC-Pool-B'] * 4,
+            'WWNN Pool': [''] * 4,
+            'WWPN Pool A': [''] * 4,
+            'WWPN Pool B': [''] * 4
+        }
+
+        # Create DataFrames
+        pools_df = pd.DataFrame(pools_data)
+        policies_df = pd.DataFrame(policies_data)
+
+        # Write DataFrames to Excel
+        pools_df.to_excel(writer, sheet_name='Pools', index=False)
+        policies_df.to_excel(writer, sheet_name='Policies', index=False)
+
+        # Get workbook and sheets
+        workbook = writer.book
+        pools_sheet = writer.sheets['Pools']
+        policies_sheet = writer.sheets['Policies']
+
+        # Define styles
+        header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+        header_font = Font(bold=True, color='FFFFFF')
+        border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+
+        # Apply styles to Pools sheet
+        for col in range(1, len(pools_data.keys()) + 1):
+            cell = pools_sheet.cell(row=1, column=col)
             cell.fill = header_fill
             cell.font = header_font
-            cell.alignment = header_alignment
-            cell.border = thin_border
-            # Set column width based on header length
-            width = max(15, len(header) + 2)  # minimum width of 15
-            ws.column_dimensions[chr(64 + col)].width = width
+            column_letter = get_column_letter(col)
+            pools_sheet.column_dimensions[column_letter].width = 20
+
+        # Apply styles to Policies sheet
+        for col in range(1, len(policies_data.keys()) + 1):
+            cell = policies_sheet.cell(row=1, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            column_letter = get_column_letter(col)
+            policies_sheet.column_dimensions[column_letter].width = 20
+
+        # Add data validation for Organizations in Pools sheet
+        org_dv = DataValidation(
+            type="list",
+            formula1=f'"{organizations_str}"',
+            allow_blank=True
+        )
+        pools_sheet.add_data_validation(org_dv)
+        for row in range(2, 50):
+            org_dv.add(f'D{row}')
+
+        # Add data validation for Organizations in Policies sheet
+        policies_org_dv = DataValidation(
+            type="list",
+            formula1=f'"{organizations_str}"',
+            allow_blank=True
+        )
+        policies_sheet.add_data_validation(policies_org_dv)
+        for row in range(2, 50):
+            policies_org_dv.add(f'D{row}')
+
+        # Add data validation for Pool Type
+        pool_type_dv = DataValidation(
+            type="list",
+            formula1='"MAC Pool,UUID Pool"',
+            allow_blank=True
+        )
+        pools_sheet.add_data_validation(pool_type_dv)
+        for row in range(2, 50):
+            pool_type_dv.add(f'A{row}')
+
+        # Add data validation for Assignment Order
+        assignment_order_dv = DataValidation(
+            type="list",
+            formula1='"SEQUENTIAL,RANDOM"',
+            allow_blank=True
+        )
+        pools_sheet.add_data_validation(assignment_order_dv)
+        for row in range(2, 50):
+            assignment_order_dv.add(f'E{row}')
+
+        # Add data validation for Policy Type
+        policy_type_dv = DataValidation(
+            type="list",
+            formula1='"BIOS,QoS,vNIC,Storage"',
+            allow_blank=True
+        )
+        policies_sheet.add_data_validation(policy_type_dv)
+        for row in range(2, 50):
+            policy_type_dv.add(f'A{row}')
+
+        # Add data validation for MAC Pool A and B
+        mac_pool_dv = DataValidation(
+            type="list",
+            formula1='"MAC-Pool-A,MAC-Pool-B"',
+            allow_blank=True
+        )
+        policies_sheet.add_data_validation(mac_pool_dv)
+        for row in range(2, 50):
+            mac_pool_dv.add(f'E{row}')  # MAC Pool A
+            mac_pool_dv.add(f'F{row}')  # MAC Pool B
+
+        # Save the workbook
+        writer.close()
+        
+        print(f"\nExcel template has been created at: {args.file}")
+        print("The template includes organization dropdowns in both sheets.")
+        print("When you select an organization in column D, all rows will show the same options.")
+        print("\nWhen ready to push to Intersight, run:")
+        print(f"python3 {sys.argv[0]} --action push --file {args.file}")
+        
+    elif args.action == 'push':
+        if not os.path.exists(args.file):
+            print(f"Error: Excel file not found: {args.file}")
+            sys.exit(1)
             
-        # Add subtle fill to data rows for better readability
-        light_fill = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
-        for row in range(2, 11):  # Add light background to first 10 data rows
-            for col in range(1, len(headers) + 1):
-                cell = ws.cell(row=row, column=col)
-                cell.fill = light_fill if row % 2 == 0 else PatternFill()
-                cell.border = Border(
-                    left=Side(style='thin', color='E0E0E0'),
-                    right=Side(style='thin', color='E0E0E0'),
-                    top=Side(style='thin', color='E0E0E0'),
-                    bottom=Side(style='thin', color='E0E0E0')
-                )
-    
-    # Add data validation with improved styling
-    validation_rules = {
-        "Pools": {
-            "Pool Type": '"MAC Pool,UUID Pool"',
-            "Assignment Order": '"SEQUENTIAL,RANDOM"',
-            "column": "A"
-        },
-        "Policies": {
-            "Policy Type": '"BIOS,QoS,vNIC,Storage"',
-            "column": "A"
-        }
-    }
-    
-    for sheet_name, rules in validation_rules.items():
-        ws = wb[sheet_name]
-        for field, values in rules.items():
-            if field != "column":
-                dv = DataValidation(
-                    type="list",
-                    formula1=values,
-                    allow_blank=True,
-                    showDropDown=True,  # Show dropdown arrow
-                    showInputMessage=True,
-                    promptTitle=f'Select {field}',
-                    prompt=f'Please choose a value from the dropdown list'
-                )
-                ws.add_data_validation(dv)
-                dv.add(f'{rules["column"]}2:{rules["column"]}1000')
-    
-    # Create output directory if it doesn't exist
-    os.makedirs('output', exist_ok=True)
-    
-    # Save the workbook
-    template_path = os.path.join('output', 'Intersight_Foundation.xlsx')
-    wb.save(template_path)
-    print(f"Excel template has been created at: {template_path}")
-    return template_path
-
-# Create output directory if it doesn't exist
-os.makedirs('output', exist_ok=True)
-
-# Define the output file path
-output_file = 'output/Intersight_Foundation.xlsx'
-
-# Create a Pandas Excel writer using openpyxl as the engine
-writer = pd.ExcelWriter(output_file, engine='openpyxl')
-
-# Get organizations from Intersight
-api_client = get_api_client()
-organizations = get_organizations(api_client)
-organizations_str = ','.join(organizations) if organizations else "default"
-
-# Pools Sheet Data
-pools_data = {
-    'Pool Type': [
-        'MAC Pool',
-        'MAC Pool',
-        'UUID Pool'
-    ],
-    'Name': [
-        'MAC-Pool-A',
-        'MAC-Pool-B',
-        'UUID-Pool'
-    ],
-    'Description': [
-        'MAC Pool for Fabric A',
-        'MAC Pool for Fabric B',
-        'UUID Pool for UCS Servers'
-    ],
-    'Organization': ['default'] * 3,
-    'Assignment Order': ['sequential'] * 3,
-    'ID Blocks': [
-        '00:25:B5:A1:00:00-00:25:B5:A1:00:FF',  
-        '00:25:B5:A2:00:00-00:25:B5:A2:00:FF',  
-        '0000-000000000010'  
-    ],
-    'First Address': [
-        '', '', ''
-    ],
-    'Size': [
-        '', '', ''
-    ]
-}
-
-# Policies Sheet Data
-policies_data = {
-    'Policy Type': [
-        'BIOS',
-        'QoS',
-        'vNIC',
-        'Storage'
-    ],
-    'Name': [
-        'BIOS-Default',
-        'QoS-Default',
-        'vNIC-Default',
-        'Storage-Default'
-    ],
-    'Description': [
-        'Default BIOS policy',
-        'Default QoS policy',
-        'Default vNIC policy',
-        'Default Storage policy'
-    ],
-    'Organization': ['default'] * 4,
-    'MAC Pool A': ['MAC-Pool-A'] * 4,
-    'MAC Pool B': ['MAC-Pool-B'] * 4,
-    'WWNN Pool': [''] * 4,
-    'WWPN Pool A': [''] * 4,
-    'WWPN Pool B': [''] * 4
-}
-
-# Create DataFrames
-pools_df = pd.DataFrame(pools_data)
-policies_df = pd.DataFrame(policies_data)
-
-# Write DataFrames to Excel
-pools_df.to_excel(writer, sheet_name='Pools', index=False)
-policies_df.to_excel(writer, sheet_name='Policies', index=False)
-
-# Get workbook and sheets
-workbook = writer.book
-pools_sheet = writer.sheets['Pools']
-policies_sheet = writer.sheets['Policies']
-
-# Define styles
-header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
-header_font = Font(name='Calibri', size=11, bold=True, color="FFFFFF")
-header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-thin_border = Border(
-    left=Side(style='thin'),
-    right=Side(style='thin'),
-    top=Side(style='thin'),
-    bottom=Side(style='thin')
-)
-
-# Apply styles to Pools sheet
-for col, header in enumerate(pools_data.keys(), 1):
-    cell = pools_sheet.cell(row=1, column=col, value=header)
-    cell.fill = header_fill
-    cell.font = header_font
-    cell.alignment = header_alignment
-    cell.border = thin_border
-    column_letter = get_column_letter(col)
-    pools_sheet.column_dimensions[column_letter].width = 20
-
-# Apply styles to Policies sheet
-for col, header in enumerate(policies_data.keys(), 1):
-    cell = policies_sheet.cell(row=1, column=col, value=header)
-    cell.fill = header_fill
-    cell.font = header_font
-    cell.alignment = header_alignment
-    cell.border = thin_border
-    column_letter = get_column_letter(col)
-    policies_sheet.column_dimensions[column_letter].width = 20
-
-# Add data validation for Assignment Order
-assignment_order_dv = DataValidation(
-    type="list",
-    formula1='"SEQUENTIAL,RANDOM"',
-    allow_blank=True
-)
-pools_sheet.add_data_validation(assignment_order_dv)
-assignment_order_dv.add('E2:E1000')  
-
-# Add data validation for Organizations in Pools sheet
-org_dv = DataValidation(
-    type="list",
-    formula1=f'"{organizations_str}"',
-    allow_blank=True
-)
-pools_sheet.add_data_validation(org_dv)
-for row in range(2, len(pools_data['Pool Type']) + 2):
-    org_dv.add(f'D{row}')  
-
-# Add data validation for Organizations in Policies sheet
-policies_org_dv = DataValidation(
-    type="list",
-    formula1=f'"{organizations_str}"',
-    allow_blank=True
-)
-policies_sheet.add_data_validation(policies_org_dv)
-for row in range(2, len(policies_data['Policy Type']) + 2):
-    policies_org_dv.add(f'E{row}')  
-
-# Add data validation for Policy Type
-policy_type_dv = DataValidation(
-    type="list",
-    formula1='"BIOS,QoS,vNIC,Storage"',
-    allow_blank=True
-)
-policies_sheet.add_data_validation(policy_type_dv)
-for row in range(2, len(policies_data['Policy Type']) + 2):
-    policy_type_dv.add(f'A{row}')
-
-# Add data validation for MAC Pool
-mac_pool_dv = DataValidation(
-    type="list",
-    formula1='"' + ','.join(pools_data['Name']) + '"',
-    allow_blank=True
-)
-policies_sheet.add_data_validation(mac_pool_dv)
-for row in range(2, len(policies_data['Policy Type']) + 2):
-    mac_pool_dv.add(f'G{row}')  
-
-# Add data validation for WWNN Pool
-wwnn_pool_dv = DataValidation(
-    type="list",
-    formula1='"' + '"' + '"',
-    allow_blank=True
-)
-policies_sheet.add_data_validation(wwnn_pool_dv)
-for row in range(2, len(policies_data['Policy Type']) + 2):
-    wwnn_pool_dv.add(f'H{row}')  
-
-# Add data validation for WWPN Pool A
-wwpn_pool_a_dv = DataValidation(
-    type="list",
-    formula1='"' + '"' + '"',
-    allow_blank=True
-)
-policies_sheet.add_data_validation(wwpn_pool_a_dv)
-for row in range(2, len(policies_data['Policy Type']) + 2):
-    wwpn_pool_a_dv.add(f'I{row}')  
-
-# Add data validation for WWPN Pool B
-wwpn_pool_b_dv = DataValidation(
-    type="list",
-    formula1='"' + '"' + '"',
-    allow_blank=True
-)
-policies_sheet.add_data_validation(wwpn_pool_b_dv)
-for row in range(2, len(policies_data['Policy Type']) + 2):
-    wwpn_pool_b_dv.add(f'J{row}')  
-
-# Add data validation for Pool Type
-pool_type_dv = DataValidation(
-    type="list",
-    formula1='"MAC Pool,UUID Pool"',
-    allow_blank=True
-)
-pools_sheet.add_data_validation(pool_type_dv)
-for row in range(2, len(pools_data['Pool Type']) + 2):
-    pool_type_dv.add(f'A{row}')
-
-# Save the workbook
-writer.close()
-
-print(f"Excel template has been created at: {output_file}")
-
-if __name__ == "__main__":
-    output_file = 'output/Intersight_Foundation.xlsx'
-    
-    # Create output directory if it doesn't exist
-    os.makedirs('output', exist_ok=True)
-    
-    # Create Excel writer
-    writer = pd.ExcelWriter(output_file, engine='openpyxl')
-    
-    # Create DataFrames
-    pools_df = pd.DataFrame(pools_data)
-    policies_df = pd.DataFrame(policies_data)
-    
-    # Write DataFrames to Excel
-    pools_df.to_excel(writer, sheet_name='Pools', index=False)
-    policies_df.to_excel(writer, sheet_name='Policies', index=False)
-    
-    # Get workbook and sheets
-    workbook = writer.book
-    pools_sheet = writer.sheets['Pools']
-    policies_sheet = writer.sheets['Policies']
-    
-    # Add data validation for Pool Type
-    pool_type_dv = DataValidation(
-        type="list",
-        formula1='"MAC Pool,UUID Pool"',
-        allow_blank=True
-    )
-    pools_sheet.add_data_validation(pool_type_dv)
-    for row in range(2, len(pools_data['Pool Type']) + 2):
-        pool_type_dv.add(f'A{row}')
-    
-    # Add data validation for Assignment Order
-    assignment_order_dv = DataValidation(
-        type="list",
-        formula1='"SEQUENTIAL,RANDOM"',
-        allow_blank=True
-    )
-    pools_sheet.add_data_validation(assignment_order_dv)
-    for row in range(2, len(pools_data['Assignment Order']) + 2):
-        assignment_order_dv.add(f'C{row}')
-    
-    # Add data validation for Organizations
-    org_dv = DataValidation(
-        type="list",
-        formula1='"default"',
-        allow_blank=True
-    )
-    pools_sheet.add_data_validation(org_dv)
-    for row in range(2, len(pools_data['Pool Type']) + 2):
-        org_dv.add(f'E{row}')
-    
-    # Add data validation for Policy Type
-    policy_type_dv = DataValidation(
-        type="list",
-        formula1='"BIOS,QoS,vNIC,Storage"',
-        allow_blank=True
-    )
-    policies_sheet.add_data_validation(policy_type_dv)
-    for row in range(2, len(policies_data['Policy Type']) + 2):
-        policy_type_dv.add(f'A{row}')
-    
-    # Add data validation for Organizations in Policies sheet
-    policies_org_dv = DataValidation(
-        type="list",
-        formula1='"default"',
-        allow_blank=True
-    )
-    policies_sheet.add_data_validation(policies_org_dv)
-    for row in range(2, len(policies_data['Policy Type']) + 2):
-        policies_org_dv.add(f'E{row}')
-    
-    # Add data validation for MAC Pool
-    mac_pool_dv = DataValidation(
-        type="list",
-        formula1='"' + ','.join(pools_data['Name']) + '"',
-        allow_blank=True
-    )
-    policies_sheet.add_data_validation(mac_pool_dv)
-    for row in range(2, len(policies_data['Policy Type']) + 2):
-        mac_pool_dv.add(f'G{row}')
-    
-    # Add data validation for WWNN Pool
-    wwnn_pool_dv = DataValidation(
-        type="list",
-        formula1='"' + '"' + '"',
-        allow_blank=True
-    )
-    policies_sheet.add_data_validation(wwnn_pool_dv)
-    for row in range(2, len(policies_data['Policy Type']) + 2):
-        wwnn_pool_dv.add(f'H{row}')
-    
-    # Add data validation for WWPN Pool A
-    wwpn_pool_a_dv = DataValidation(
-        type="list",
-        formula1='"' + '"' + '"',
-        allow_blank=True
-    )
-    policies_sheet.add_data_validation(wwpn_pool_a_dv)
-    for row in range(2, len(policies_data['Policy Type']) + 2):
-        wwpn_pool_a_dv.add(f'I{row}')
-    
-    # Add data validation for WWPN Pool B
-    wwpn_pool_b_dv = DataValidation(
-        type="list",
-        formula1='"' + '"' + '"',
-        allow_blank=True
-    )
-    policies_sheet.add_data_validation(wwpn_pool_b_dv)
-    for row in range(2, len(policies_data['Policy Type']) + 2):
-        wwpn_pool_b_dv.add(f'J{row}')
-    
-    # Save the workbook
-    writer.close()
-    
-    print(f"Excel template has been created at: {output_file}")
-    
-    # Ask if user wants to process the template
-    response = input("Would you like to process the template and create the pools/policies in Intersight? (y/n): ")
-    if response.lower() == 'y':
-        process_foundation_template(output_file)
+        print(f"Pushing configuration from {args.file} to Intersight...")
+        process_foundation_template(args.file)
