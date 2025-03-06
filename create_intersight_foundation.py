@@ -649,6 +649,100 @@ def process_foundation_template(excel_file):
     except Exception as e:
         print(f"Error processing template: {str(e)}")
 
+def create_foundation_template():
+    """
+    Create an Excel template for Intersight Foundation configuration
+    """
+    # Create a new workbook
+    wb = load_workbook()
+    
+    # Define styles
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")  # Dark blue
+    header_font = Font(name='Calibri', size=11, bold=True, color="FFFFFF")  # White text
+    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+    
+    # Create sheets and apply styling
+    sheets_config = {
+        "Pools": ["Pool Type", "Name", "Description", "Organization", "Assignment Order", "ID Blocks", "First Address", "Size"],
+        "Policies": ["Policy Type", "Name", "Description", "Organization", "MAC Pool A", "MAC Pool B", "WWNN Pool", "WWPN Pool A", "WWPN Pool B"]
+    }
+    
+    # Create and style each sheet
+    for sheet_name, headers in sheets_config.items():
+        if sheet_name == "Pools":
+            ws = wb.active
+            ws.title = sheet_name
+        else:
+            ws = wb.create_sheet(sheet_name)
+            
+        # Apply headers and styling
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+            cell.border = thin_border
+            # Set column width based on header length
+            width = max(15, len(header) + 2)  # minimum width of 15
+            ws.column_dimensions[chr(64 + col)].width = width
+            
+        # Add subtle fill to data rows for better readability
+        light_fill = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
+        for row in range(2, 11):  # Add light background to first 10 data rows
+            for col in range(1, len(headers) + 1):
+                cell = ws.cell(row=row, column=col)
+                cell.fill = light_fill if row % 2 == 0 else PatternFill()
+                cell.border = Border(
+                    left=Side(style='thin', color='E0E0E0'),
+                    right=Side(style='thin', color='E0E0E0'),
+                    top=Side(style='thin', color='E0E0E0'),
+                    bottom=Side(style='thin', color='E0E0E0')
+                )
+    
+    # Add data validation with improved styling
+    validation_rules = {
+        "Pools": {
+            "Pool Type": '"MAC Pool,UUID Pool"',
+            "Assignment Order": '"SEQUENTIAL,RANDOM"',
+            "column": "A"
+        },
+        "Policies": {
+            "Policy Type": '"BIOS,QoS,vNIC,Storage"',
+            "column": "A"
+        }
+    }
+    
+    for sheet_name, rules in validation_rules.items():
+        ws = wb[sheet_name]
+        for field, values in rules.items():
+            if field != "column":
+                dv = DataValidation(
+                    type="list",
+                    formula1=values,
+                    allow_blank=True,
+                    showDropDown=True,  # Show dropdown arrow
+                    showInputMessage=True,
+                    promptTitle=f'Select {field}',
+                    prompt=f'Please choose a value from the dropdown list'
+                )
+                ws.add_data_validation(dv)
+                dv.add(f'{rules["column"]}2:{rules["column"]}1000')
+    
+    # Create output directory if it doesn't exist
+    os.makedirs('output', exist_ok=True)
+    
+    # Save the workbook
+    template_path = os.path.join('output', 'Intersight_Foundation.xlsx')
+    wb.save(template_path)
+    print(f"Excel template has been created at: {template_path}")
+    return template_path
+
 # Create output directory if it doesn't exist
 os.makedirs('output', exist_ok=True)
 
@@ -737,9 +831,10 @@ pools_sheet = writer.sheets['Pools']
 policies_sheet = writer.sheets['Policies']
 
 # Define styles
-header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
-header_font = Font(bold=True, color='FFFFFF')
-border = Border(
+header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
+header_font = Font(name='Calibri', size=11, bold=True, color="FFFFFF")
+header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+thin_border = Border(
     left=Side(style='thin'),
     right=Side(style='thin'),
     top=Side(style='thin'),
@@ -747,18 +842,22 @@ border = Border(
 )
 
 # Apply styles to Pools sheet
-for col in range(1, len(pools_data.keys()) + 1):
-    cell = pools_sheet.cell(row=1, column=col)
+for col, header in enumerate(pools_data.keys(), 1):
+    cell = pools_sheet.cell(row=1, column=col, value=header)
     cell.fill = header_fill
     cell.font = header_font
+    cell.alignment = header_alignment
+    cell.border = thin_border
     column_letter = get_column_letter(col)
     pools_sheet.column_dimensions[column_letter].width = 20
 
 # Apply styles to Policies sheet
-for col in range(1, len(policies_data.keys()) + 1):
-    cell = policies_sheet.cell(row=1, column=col)
+for col, header in enumerate(policies_data.keys(), 1):
+    cell = policies_sheet.cell(row=1, column=col, value=header)
     cell.fill = header_fill
     cell.font = header_font
+    cell.alignment = header_alignment
+    cell.border = thin_border
     column_letter = get_column_letter(col)
     policies_sheet.column_dimensions[column_letter].width = 20
 
@@ -769,9 +868,7 @@ assignment_order_dv = DataValidation(
     allow_blank=True
 )
 pools_sheet.add_data_validation(assignment_order_dv)
-assignment_order_col = 4  
-for row in range(2, len(pools_data['Pool Type']) + 2):
-    assignment_order_dv.add(f'D{row}')
+assignment_order_dv.add('E2:E1000')  
 
 # Add data validation for Organizations in Pools sheet
 org_dv = DataValidation(
@@ -781,7 +878,7 @@ org_dv = DataValidation(
 )
 pools_sheet.add_data_validation(org_dv)
 for row in range(2, len(pools_data['Pool Type']) + 2):
-    org_dv.add(f'E{row}')  
+    org_dv.add(f'D{row}')  
 
 # Add data validation for Organizations in Policies sheet
 policies_org_dv = DataValidation(
