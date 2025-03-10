@@ -907,8 +907,21 @@ def add_profiles_sheet(excel_file, api_client):
             if '*' in header:
                 cell.font = Font(color='FF0000', bold=True)
         
-        # Example profile data
-        profiles_sheet.append(['AI-Server-01', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No'])
+        # Example profile data for 8 profiles
+        example_profiles = [
+            ['AI-Server-01', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No'],
+            ['AI-Server-02', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No'],
+            ['AI-Server-03', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No'],
+            ['AI-Server-04', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No'],
+            ['AI-Server-05', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No'],
+            ['AI-Server-06', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No'],
+            ['AI-Server-07', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No'],
+            ['AI-Server-08', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No']
+        ]
+        
+        # Add all example profiles to the sheet
+        for profile in example_profiles:
+            profiles_sheet.append(profile)
         
         # Get available servers from Intersight
         compute_api_instance = compute_api.ComputeApi(api_client)
@@ -948,7 +961,8 @@ def add_profiles_sheet(excel_file, api_client):
             formula1=f'"{",".join(org_names)}"',
             allow_blank=True
         )
-        org_validation.add('C2:C7')  # Apply to Organization column
+        org_validation.add('C2:C9')  # Apply to Organization column for 8 profiles
+        profiles_sheet.add_data_validation(org_validation)
         
         # Adjust column widths
         min_widths = {

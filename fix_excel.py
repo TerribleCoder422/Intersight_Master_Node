@@ -5,6 +5,8 @@ Fix Excel file for Intersight Foundation
 
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.styles import Font, PatternFill, Alignment
 
 # Path to the Excel file
 file_path = '/Users/isaiahlaughlin/Lumos Dropbox/isaiah laughlin/Mac/Desktop/Python journey/Automate-Intersight/output/Intersight_Foundation.xlsx'
