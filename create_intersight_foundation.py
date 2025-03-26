@@ -15,6 +15,10 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 import uuid
+from datetime import datetime
+import functools
+import concurrent.futures
+from typing import Dict, List, Any, Tuple, Optional
 from intersight.api import (
     bios_api,
     boot_api,
@@ -30,6 +34,68 @@ from intersight.api import (
     uuidpool_api,
     vnic_api
 )
+
+# Cache for API results
+API_CACHE = {}
+
+# Current version of the template
+TEMPLATE_VERSION = "1.0.0"
+
+# Configuration presets for common deployments
+CONFIGURATION_PRESETS = {
+    "VMware ESXi": {
+        "BIOS": "VMware-Recommended",
+        "BOOT": "ESXi-Boot",
+        "vNIC": "VMware-Dual-vNIC",
+        "QoS": "VMware-QoS",
+        "Storage": "ESXi-Storage"
+    },
+    "Windows Server": {
+        "BIOS": "Windows-Performance",
+        "BOOT": "Windows-Boot",
+        "vNIC": "Windows-Dual-vNIC",
+        "QoS": "Windows-QoS",
+        "Storage": "Windows-Storage"
+    },
+    "RedHat Enterprise Linux": {
+        "BIOS": "RHEL-Performance",
+        "BOOT": "RHEL-Boot",
+        "vNIC": "RHEL-Dual-vNIC",
+        "QoS": "RHEL-QoS",
+        "Storage": "RHEL-Storage"
+    }
+}
+
+# Known policy dependencies
+POLICY_DEPENDENCIES = {
+    "vNIC": ["QoS"],
+    "LAN Connectivity": ["vNIC", "QoS"],
+    "BOOT": ["Storage", "LAN Connectivity"],
+    "Server Profile Template": ["BIOS", "BOOT", "LAN Connectivity", "Storage"]
+}
+
+def cached_api_call(timeout_minutes=5):
+    """Decorator to cache API results with timeout to reduce calls to Intersight API."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Create a cache key based on function name and arguments
+            key = f"{func.__name__}:{str(args)}:{str(kwargs)}"
+            now = datetime.datetime.now()
+            
+            # Check if result is in cache and not expired
+            if key in API_CACHE and (now - API_CACHE[key]['timestamp']).total_seconds() < timeout_minutes * 60:
+                print(f"Using cached result for {func.__name__}")
+                return API_CACHE[key]['data']
+            
+            # Call the actual function
+            result = func(*args, **kwargs)
+            
+            # Store result in cache
+            API_CACHE[key] = {'data': result, 'timestamp': now}
+            return result
+        return wrapper
+    return decorator
 from intersight.model.vnic_lan_connectivity_policy import VnicLanConnectivityPolicy
 from intersight.model.vnic_eth_if import VnicEthIf
 from intersight.model.vnic_eth_adapter_policy import VnicEthAdapterPolicy
@@ -81,6 +147,7 @@ def get_api_client():
         print(f"Error creating API client: {str(e)}")
         return None
 
+@cached_api_call(timeout_minutes=10)
 def get_organizations(api_client):
     """
     Get list of organizations from Intersight
@@ -99,6 +166,7 @@ def get_organizations(api_client):
         print(f"Error getting organizations: {str(e)}")
         return ['default']  # Return default as fallback
 
+@cached_api_call(timeout_minutes=10)
 def get_organizations(api_client):
     """
     Get list of organizations from Intersight
@@ -137,6 +205,14 @@ def create_mac_pool(api_client, pool_data):
             print("Error: Gruve organization not found")
             return False
 
+        # Fetch organizations from Intersight
+        orgs_response = api_client.get_organizations()
+        org_names = [org['Name'] for org in orgs_response['Results']]
+
+        # Fetch servers from Intersight
+        servers_response = api_client.get_servers()
+        servers = servers_response['Results']
+        
         # Create organization reference
         org_ref = MoMoRef(
             class_id="mo.MoRef",
@@ -819,8 +895,15 @@ def create_server_template_from_excel(api_client, excel_file):
         traceback.print_exc()
         return False
 
-def get_available_servers(api_client):
-    """Get list of available servers from Intersight"""
+@cached_api_call(timeout_minutes=5)
+def get_available_servers(api_client, for_dropdown=False):
+    """Get list of available servers from Intersight
+    
+    Args:
+        api_client: The Intersight API client
+        for_dropdown: If True, returns formatted strings for Excel dropdowns,
+                     otherwise returns detailed server info dictionaries
+    """
     try:
         # Create API instance for compute servers
         api_instance = compute_api.ComputeApi(api_client)
@@ -828,58 +911,74 @@ def get_available_servers(api_client):
         # Get list of physical servers
         servers = api_instance.get_compute_rack_unit_list()
         
-        # Extract server details
-        server_list = []
-        for server in servers.results:
-            # Get organization name if available
-            org_name = 'default'
-            if hasattr(server, 'organization') and server.organization:
-                org_api = organization_api.OrganizationApi(api_client)
-                org = org_api.get_organization_organization_by_moid(server.organization.moid)
-                org_name = org.name if hasattr(org, 'name') else 'default'
+        # For dropdown format (just return server strings in the proper format)
+        if for_dropdown:
+            dropdown_servers = []
+            for server in servers.results:
+                # Get server name or use serial if no name is assigned
+                server_name = getattr(server, 'name', None) or f"Server-{server.serial}"
+                model = getattr(server, 'model', 'Unknown')
+                serial = getattr(server, 'serial', 'Unknown')
+                
+                # Format as "Name (Model) | SN: Serial" - this format matches requirements
+                # for Server dropdown in column E of Profiles sheet (with name and serial)
+                server_option = f"{server_name} ({model}) | SN: {serial}"
+                dropdown_servers.append(server_option)
+                
+            # If no servers found, provide default examples
+            if not dropdown_servers:
+                print("No servers found in Intersight, using default examples")
+                dropdown_servers = [
+                    "Server-01 (UCSX-210C-M6) | SN: FLM123456",
+                    "Server-02 (UCSX-210C-M6) | SN: FLM123457",
+                    "Server-03 (UCSX-210C-M6) | SN: FLM123458"
+                ]
             
-            # Build server info
-            server_info = {
-                'Name': server.name if hasattr(server, 'name') else 'Unknown',
-                'Model': server.model if hasattr(server, 'model') else 'Unknown',
-                'Serial': server.serial if hasattr(server, 'serial') else 'Unknown',
-                'Organization': org_name,
-                'PowerState': server.oper_power_state if hasattr(server, 'oper_power_state') else 'Unknown',
-                'ConnectionState': server.connection_status if hasattr(server, 'connection_status') else 'Unknown',
-                'IP': server.ip_address if hasattr(server, 'ip_address') else 'Unknown',
-                'Firmware': server.running_firmware if hasattr(server, 'running_firmware') else 'Unknown',
-                'Moid': server.moid if hasattr(server, 'moid') else None
-            }
-            server_list.append(server_info)
+            return dropdown_servers
+        
+        # For detailed server info (original behavior)
+        else:
+            # Extract server details
+            server_list = []
+            for server in servers.results:
+                # Get organization name if available
+                org_name = 'default'
+                if hasattr(server, 'organization') and server.organization:
+                    org_api = organization_api.OrganizationApi(api_client)
+                    org = org_api.get_organization_organization_by_moid(server.organization.moid)
+                    org_name = org.name if hasattr(org, 'name') else 'default'
+                
+                # Build server info
+                server_info = {
+                    'Name': server.name if hasattr(server, 'name') else 'Unknown',
+                    'Model': server.model if hasattr(server, 'model') else 'Unknown',
+                    'Serial': server.serial if hasattr(server, 'serial') else 'Unknown',
+                    'Organization': org_name,
+                    'PowerState': server.oper_power_state if hasattr(server, 'oper_power_state') else 'Unknown',
+                    'ConnectionState': server.connection_status if hasattr(server, 'connection_status') else 'Unknown',
+                    'IP': server.ip_address if hasattr(server, 'ip_address') else 'Unknown',
+                    'Firmware': server.running_firmware if hasattr(server, 'running_firmware') else 'Unknown',
+                    'Moid': server.moid if hasattr(server, 'moid') else None
+                }
+                server_list.append(server_info)
+                
+            # Sort servers by name
+            server_list.sort(key=lambda x: x['Name'])
             
-        # Sort servers by name
-        server_list.sort(key=lambda x: x['Name'])
-        
-        # Print server details for debugging
-        print("\nAvailable Servers:")
-        for server in server_list:
-            print(f"- {server['Name']} ({server['Model']}) | SN: {server['Serial']} | State: {server['PowerState']} | Connection: {server['ConnectionState']}")
-        
-        return server_list
+            # Print server details for debugging
+            print("\nAvailable Servers:")
+            for server in server_list:
+                print(f"- {server['Name']} ({server['Model']}) | SN: {server['Serial']} | State: {server['PowerState']} | Connection: {server['ConnectionState']}")
+            
+            return server_list
     except Exception as e:
         print(f"Error getting servers: {str(e)}")
-        return []
-
-def get_available_servers(api_client):
-    """Get list of available servers from Intersight"""
-    try:
-        compute_api_instance = compute_api.ComputeApi(api_client)
-        servers = compute_api_instance.get_compute_rack_unit_list()
-        server_options = []
-        print("\nAvailable Servers:")
-        for server in servers.results:
-            # Format: Name (Model) | Serial | State
-            server_info = f"{server.name} ({server.model}) | SN: {server.serial} | State: {server.oper_state}"
-            print(f"- {server_info}")
-            server_options.append(server_info)
-        return server_options
-    except Exception as e:
-        print(f"Error getting available servers: {str(e)}")
+        if for_dropdown:
+            return [
+                "Server-01 (UCSX-210C-M6) | SN: FLM123456",
+                "Server-02 (UCSX-210C-M6) | SN: FLM123457",
+                "Server-03 (UCSX-210C-M6) | SN: FLM123458"
+            ]
         return []
 
 def add_profiles_sheet(excel_file, api_client):
@@ -923,15 +1022,9 @@ def add_profiles_sheet(excel_file, api_client):
         for profile in example_profiles:
             profiles_sheet.append(profile)
         
-        # Get available servers from Intersight
-        compute_api_instance = compute_api.ComputeApi(api_client)
-        servers = compute_api_instance.get_compute_rack_unit_list()
-        
-        # Create server list with details
-        server_options = []
-        for server in servers.results:
-            server_info = f"{server.name} ({server.model}) | SN: {server.serial} | State: {server.oper_state}"
-            server_options.append(server_info)
+        # Get available servers from Intersight using enhanced function
+        print("Fetching server data from Intersight for dropdowns...")
+        server_options = get_available_servers(api_client, for_dropdown=True)
         
         # Add server dropdown validation
         server_formula = '"' + ','.join(server_options) + '"'
@@ -952,16 +1045,17 @@ def add_profiles_sheet(excel_file, api_client):
         deploy_validation.add('G2:G1000')  # Apply to Deploy column
         profiles_sheet.add_data_validation(deploy_validation)
         
-        # Add organization dropdown
-        org_api = organization_api.OrganizationApi(api_client)
-        orgs = org_api.get_organization_organization_list()
-        org_names = [org.name for org in orgs.results]
+        # Add organization dropdown - Column C as per requirements
+        # Use get_organizations function to get organization names
+        print("Fetching organization data for dropdowns...")
+        org_names = get_organizations(api_client)
+        
         org_validation = DataValidation(
             type='list',
             formula1=f'"{",".join(org_names)}"',
             allow_blank=True
         )
-        org_validation.add('C2:C9')  # Apply to Organization column for 8 profiles
+        org_validation.add('C2:C1000')  # Apply to Organization column (C) for all rows
         profiles_sheet.add_data_validation(org_validation)
         
         # Adjust column widths
@@ -1139,53 +1233,98 @@ def create_server_profiles_from_excel(api_client, excel_file):
         traceback.print_exc()
         return False
 
+def parallel_create_policies(api_client, policy_data_list, max_workers=5):
+    """Create multiple policies in parallel for faster execution.
+    
+    Args:
+        api_client: The Intersight API client
+        policy_data_list: List of policy data dictionaries to create
+        max_workers: Maximum number of concurrent workers
+        
+    Returns:
+        List of results (successful policies or error messages)
+    """
+    results = []
+    
+    try:
+        print(f"Creating {len(policy_data_list)} policies in parallel with {max_workers} workers")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all policy creation tasks
+            future_to_policy = {executor.submit(create_policy, api_client, policy_data): 
+                             policy_data.get('Name', f"Policy-{i}") 
+                             for i, policy_data in enumerate(policy_data_list)}
+            
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_policy):
+                policy_name = future_to_policy[future]
+                try:
+                    result = future.result()
+                    results.append({
+                        'name': policy_name,
+                        'status': 'Success',
+                        'moid': getattr(result, 'moid', 'Unknown')
+                    })
+                    print(f"✅ Created policy: {policy_name}")
+                except Exception as e:
+                    results.append({
+                        'name': policy_name,
+                        'status': 'Failed',
+                        'error': str(e)
+                    })
+                    print(f"❌ Failed to create policy {policy_name}: {str(e)}")
+        
+        # Summarize results
+        success_count = sum(1 for r in results if r['status'] == 'Success')
+        print(f"\nPolicy creation summary: {success_count}/{len(policy_data_list)} policies created successfully")
+        return results
+    except Exception as e:
+        print(f"Error in parallel policy creation: {str(e)}")
+        return results
+
 def reorder_sheets(workbook):
     """Reorder sheets to match the desired order"""
+    # Only include essential sheets - removed Presets, Dependencies, Version
     desired_order = ['Pools', 'Policies', 'Template', 'Profiles', 'Templates', 'Organizations', 'Servers']
-    current_sheets = workbook.sheetnames
     
-    # Create missing sheets if needed
+    # First, remove any duplicate sheets with '1' suffix
+    duplicate_sheets = [sheet for sheet in workbook.sheetnames if sheet.endswith('1')]
+    for sheet_name in duplicate_sheets:
+        if sheet_name in workbook.sheetnames:
+            workbook.remove(workbook[sheet_name])
+            print(f"Removed duplicate sheet: {sheet_name}")
+    
+    # Use openpyxl's built-in reordering capability instead of removing/recreating sheets
+    # This avoids creating duplicate sheets with '1' suffix
+    
+    # First create any missing essential sheets
     for sheet_name in desired_order:
-        if sheet_name not in current_sheets:
+        if sheet_name not in workbook.sheetnames:
             workbook.create_sheet(sheet_name)
+            print(f"Created missing sheet: {sheet_name}")
     
-    # Reorder sheets
+    # Now reorder the sheets using openpyxl's internal _move_sheets method
     for i, sheet_name in enumerate(desired_order):
-        # Get the current index of the sheet
-        current_index = workbook.sheetnames.index(sheet_name)
-        # If it's not in the right position, move it
-        if current_index != i:
-            sheet = workbook[sheet_name]
-            workbook.remove(sheet)
-            workbook.create_sheet(sheet_name, i)
-            
-            # Copy the removed sheet to the new position
-            new_sheet = workbook[sheet_name]
-            for row in sheet.iter_rows():
-                for cell in row:
-                    new_sheet[cell.coordinate].value = cell.value
-                    if cell.has_style:
-                        new_sheet[cell.coordinate].font = copy(cell.font)
-                        new_sheet[cell.coordinate].border = copy(cell.border)
-                        new_sheet[cell.coordinate].fill = copy(cell.fill)
-                        new_sheet[cell.coordinate].number_format = copy(cell.number_format)
-                        new_sheet[cell.coordinate].protection = copy(cell.protection)
-                        new_sheet[cell.coordinate].alignment = copy(cell.alignment)
-            
-            # Copy sheet properties
-            new_sheet.sheet_format = copy(sheet.sheet_format)
-            new_sheet.sheet_properties = copy(sheet.sheet_properties)
-            new_sheet.merged_cells = copy(sheet.merged_cells)
-            new_sheet.page_margins = copy(sheet.page_margins)
-            new_sheet.page_setup = copy(sheet.page_setup)
-            
-            # Copy column dimensions
-            for key, value in sheet.column_dimensions.items():
-                new_sheet.column_dimensions[key] = copy(value)
-            
-            # Copy row dimensions
-            for key, value in sheet.row_dimensions.items():
-                new_sheet.row_dimensions[key] = copy(value)
+        if sheet_name in workbook.sheetnames:
+            # Get the current position of the sheet
+            current_position = workbook.sheetnames.index(sheet_name)
+            # Only move the sheet if it's not already at the right position
+            if current_position != i:
+                # Use the internal _move_sheets method to avoid creating duplicates
+                workbook._move_sheets(current_position, i)
+                print(f"Moved {sheet_name} to position {i}")
+    
+    # Final check for duplicate sheets after reordering
+    duplicate_sheets = [sheet for sheet in workbook.sheetnames if sheet.endswith('1')]
+    for sheet_name in duplicate_sheets:
+        if sheet_name in workbook.sheetnames:
+            workbook.remove(workbook[sheet_name])
+            print(f"Removed duplicate sheet created during reordering: {sheet_name}")
+    
+    # Remove any sheets not in our desired order
+    for sheet_name in list(workbook.sheetnames):
+        if sheet_name not in desired_order:
+            workbook.remove(workbook[sheet_name])
+            print(f"Removed unneeded sheet: {sheet_name}")
 
 def setup_excel_file(api_client, excel_file):
     """Set up a new Excel file with the correct structure"""
@@ -1193,7 +1332,7 @@ def setup_excel_file(api_client, excel_file):
         workbook = Workbook()
         
         # Create sheets in the correct order
-        sheets = ['Pools', 'Policies', 'Template', 'Profiles']
+        sheets = ['Pools', 'Policies', 'Template', 'Profiles', 'Templates', 'Organizations', 'Servers']
         for sheet_name in sheets:
             if sheet_name in workbook.sheetnames:
                 workbook.remove(workbook[sheet_name])
@@ -1299,12 +1438,12 @@ def setup_excel_file(api_client, excel_file):
         server_list = '","'.join(server_options)
         server_validation = DataValidation(type='list', formula1=f'"{server_list}"', allow_blank=True)
         profiles_sheet.add_data_validation(server_validation)
-        server_validation.add('E2:E1000')
+        server_validation.add('E2:E1000')  # Apply to Server column
         
         # Add deploy dropdown validation
         deploy_validation = DataValidation(type='list', formula1='"Yes,No"', allow_blank=True)
         profiles_sheet.add_data_validation(deploy_validation)
-        deploy_validation.add('G2:G1000')
+        deploy_validation.add('G2:G1000')  # Apply to Deploy column
         
         # Set up dropdowns for all sheets
         # Pools sheet dropdown
@@ -1340,12 +1479,60 @@ def setup_excel_file(api_client, excel_file):
             platform_validation = DataValidation(
                 type='list',
                 formula1=f'"{",".join(platform_types)}"',
-                allow_blank=True
+                allow_blank=True,
+                showDropDown=True,
+                errorTitle='Invalid Platform',
+                error='Please select either FIAttached or Standalone from the dropdown'
             )
             platform_validation.add('D2:D1000')
             template_sheet.add_data_validation(platform_validation)
             print("Added dropdown for Platform Types in Template sheet")
 
+        # Setup Presets sheet
+        if 'Presets' in workbook.sheetnames:
+            presets_sheet = workbook['Presets']
+            headers = ["Preset Name", "BIOS Policy", "Boot Policy", "vNIC Policy", "QoS Policy", "Storage Policy", "Description"]
+            for col, header in enumerate(headers, 1):
+                cell = presets_sheet.cell(row=1, column=col, value=header)
+                cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
+                cell.font = Font(color='FFFFFF', bold=True)
+            
+            # Add preset configurations
+            row = 2
+            for preset_name, policies in CONFIGURATION_PRESETS.items():
+                presets_sheet.cell(row=row, column=1, value=preset_name)
+                presets_sheet.cell(row=row, column=2, value=policies.get('BIOS', ''))
+                presets_sheet.cell(row=row, column=3, value=policies.get('BOOT', ''))
+                presets_sheet.cell(row=row, column=4, value=policies.get('vNIC', ''))
+                presets_sheet.cell(row=row, column=5, value=policies.get('QoS', ''))
+                presets_sheet.cell(row=row, column=6, value=policies.get('Storage', ''))
+                
+                # Add descriptions based on preset type
+                descriptions = {
+                    "VMware ESXi": "Optimized settings for VMware ESXi hypervisor deployments",
+                    "Windows Server": "Optimized settings for Windows Server workloads",
+                    "RedHat Enterprise Linux": "Optimized settings for RHEL server deployments"
+                }
+                presets_sheet.cell(row=row, column=7, value=descriptions.get(preset_name, ''))
+                row += 1
+            
+            # Set column widths
+            presets_sheet.column_dimensions['A'].width = 25
+            presets_sheet.column_dimensions['B'].width = 20
+            presets_sheet.column_dimensions['C'].width = 20
+            presets_sheet.column_dimensions['D'].width = 20
+            presets_sheet.column_dimensions['E'].width = 20
+            presets_sheet.column_dimensions['F'].width = 20
+            presets_sheet.column_dimensions['G'].width = 50
+            
+            print("Added Configuration Presets sheet with VMware, Windows, and RedHat templates")
+
+        # Add version tracking sheet
+        add_version_sheet(workbook)
+        
+        # Add dependency visualization sheet
+        add_dependency_sheet(workbook)
+        
         # Save the workbook
         workbook.save(excel_file)
         print("Excel file has been set up with correct sheet order and structure")
@@ -1376,6 +1563,11 @@ def create_template_excel(excel_file):
         'Servers'  # Info sheet
     ]
     
+    # Create sample lists for dropdowns - these will be populated from Intersight when the automation runs
+    org_list = ["default", "DevOps", "Production", "Test", "UAT"]
+    server_list = ["Server-1 (FCH1234V5Z7)", "Server-2 (FCH5678A9BC)", "Server-3 (FCH9012D3EF)"]
+    
+    # Create all sheets first
     for sheet_name in sheets:
         workbook.create_sheet(sheet_name)
     
@@ -1398,8 +1590,8 @@ def create_template_excel(excel_file):
         for col, value in enumerate(example, 1):
             pools_sheet.cell(row=idx, column=col, value=value)
     
-    # Set up Policies sheet
-    policies_sheet = workbook.create_sheet('Policies')
+    # Set up Policies sheet - get the already created sheet
+    policies_sheet = workbook['Policies']
     policies_headers = ["Policy Type*", "Policy Name*", "Description", "Organization*"]
     for col, header in enumerate(policies_headers, 1):
         cell = policies_sheet.cell(row=1, column=col, value=header)
@@ -1418,9 +1610,14 @@ def create_template_excel(excel_file):
     for row_idx, row in enumerate(sample_policies, 2):
         for col_idx, value in enumerate(row, 1):
             policies_sheet.cell(row=row_idx, column=col_idx, value=value)
+            
+    # Add organization dropdown to column D in Policies sheet
+    org_validation_policies = DataValidation(type='list', formula1='"default,DevOps,Production,Test,UAT"', allow_blank=True)
+    policies_sheet.add_data_validation(org_validation_policies)
+    org_validation_policies.add('D2:D1000')  # Column D
     
-    # Set up Template sheet
-    template_sheet = workbook.create_sheet('Template')
+    # Set up Template sheet - use the existing sheet
+    template_sheet = workbook['Template']
     template_headers = [
         "Template Name*", 
         "Organization*", 
@@ -1451,9 +1648,19 @@ def create_template_excel(excel_file):
     ]
     for col, value in enumerate(template_example, 1):
         template_sheet.cell(row=2, column=col, value=value)
+        
+    # Add organization dropdown to column B in Template sheet
+    org_validation_template = DataValidation(type='list', formula1='"default,DevOps,Production,Test,UAT"', allow_blank=True)
+    template_sheet.add_data_validation(org_validation_template)
+    org_validation_template.add('B2:B1000')  # Column B
     
-    # Set up Profiles sheet
-    profiles_sheet = workbook.create_sheet('Profiles')
+    # Add target platform dropdown to column D in Template sheet
+    platform_validation = DataValidation(type='list', formula1='"FIAttached,Standalone"', allow_blank=True)
+    template_sheet.add_data_validation(platform_validation)
+    platform_validation.add('D2:D1000')  # Column D
+    
+    # Set up Profiles sheet - use the existing sheet
+    profiles_sheet = workbook['Profiles']
     profile_headers = ["Profile Name*", "Description", "Organization*", "Template Name*", "Server*", "Description", "Deploy*"]
     for col, header in enumerate(profile_headers, 1):
         cell = profiles_sheet.cell(row=1, column=col, value=header)
@@ -1468,6 +1675,43 @@ def create_template_excel(excel_file):
     profiles_sheet.add_data_validation(deploy_validation)
     deploy_validation.add('G2:G1000')
     
+    # Add organization dropdown to column C in Profiles sheet
+    org_validation_profiles = DataValidation(type='list', formula1='"default,DevOps,Production,Test,UAT"', allow_blank=True)
+    profiles_sheet.add_data_validation(org_validation_profiles)
+    org_validation_profiles.add('C2:C1000')  # Column C
+    
+    # Add server dropdown (with name and serial) to column E
+    server_validation = DataValidation(type='list', formula1='"Server-1 (FCH1234V5Z7),Server-2 (FCH5678A9BC),Server-3 (FCH9012D3EF)"', allow_blank=True)
+    profiles_sheet.add_data_validation(server_validation)
+    server_validation.add('E2:E1000')  # Column E
+    
+    # Create sample organization list for dropdowns
+    org_list = ["default", "DevOps", "Production", "Test", "UAT"]
+    
+    # Create sample server list for dropdowns (with name and serial)
+    server_list = ["Server-1 (FCH1234V5Z7)", "Server-2 (FCH5678A9BC)", "Server-3 (FCH9012D3EF)"]
+    
+    # Profiles sheet: Organization in column C, Server dropdown in column E
+    org_validation_profiles = DataValidation(type='list', formula1=f'"{",".join(org_list)}"', allow_blank=True)
+    profiles_sheet.add_data_validation(org_validation_profiles)
+    org_validation_profiles.add('C2:C1000')  # Column C
+    
+    server_validation = DataValidation(type='list', formula1=f'"{",".join(server_list)}"', allow_blank=True)
+    profiles_sheet.add_data_validation(server_validation)
+    server_validation.add('E2:E1000')  # Column E
+    
+    # Policies sheet: Organization in column D
+    org_validation_policies = DataValidation(type='list', formula1=f'"{",".join(org_list)}"', allow_blank=True)
+    policies_sheet.add_data_validation(org_validation_policies)
+    org_validation_policies.add('D2:D1000')  # Column D
+    
+    # Template sheet: Organization in column B
+    org_validation_template = DataValidation(type='list', formula1=f'"{",".join(org_list)}"', allow_blank=True)
+    template_sheet.add_data_validation(org_validation_template)
+    org_validation_template.add('B2:B1000')  # Column B
+    
+    # Pools sheet: No organization dropdown needed (as per requirements)
+    
     # Set column widths for all sheets
     for sheet in workbook.sheetnames:
         ws = workbook[sheet]
@@ -1476,6 +1720,8 @@ def create_template_excel(excel_file):
             adjusted_width = max(max_length + 2, 15)
             ws.column_dimensions[get_column_letter(column[0].column)].width = adjusted_width
     
+    # We're keeping only the essential sheets and dropdowns
+
     # Save the workbook
     workbook.save(excel_file)
     print(f"Created template Excel file: {excel_file}")
@@ -1486,6 +1732,101 @@ def add_data_validation(worksheet, column, start_row, end_row, formula):
     validation = DataValidation(type='list', formula1=formula)
     worksheet.add_data_validation(validation)
     validation.add(f'{column}{start_row}:{column}{end_row}')
+
+def add_dependency_sheet(workbook):
+    """Add a policy dependency visualization sheet to the workbook.
+    
+    Args:
+        workbook: The Excel workbook to add the dependency sheet to
+    """
+    try:
+        # Check if Dependencies sheet exists
+        if "Dependencies" not in workbook.sheetnames:
+            # Create the sheet
+            dep_sheet = workbook.create_sheet("Dependencies")
+            
+            # Add headers
+            dep_sheet.cell(row=1, column=1, value="Policy/Component")
+            dep_sheet.cell(row=1, column=2, value="Depends On")
+            dep_sheet.cell(row=1, column=3, value="Relationship")
+            
+            # Format headers
+            for col in range(1, 4):
+                cell = dep_sheet.cell(row=1, column=col)
+                cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
+                cell.font = Font(color='FFFFFF', bold=True)
+            
+            # Add dependency data
+            row = 2
+            for component, dependencies in POLICY_DEPENDENCIES.items():
+                for dependency in dependencies:
+                    dep_sheet.cell(row=row, column=1, value=component)
+                    dep_sheet.cell(row=row, column=2, value=dependency)
+                    dep_sheet.cell(row=row, column=3, value="Required")
+                    
+                    # Apply formatting
+                    for col in range(1, 4):
+                        cell = dep_sheet.cell(row=row, column=col)
+                        if col == 1:
+                            cell.font = Font(bold=True)
+                    
+                    row += 1
+            
+            # Set column widths
+            dep_sheet.column_dimensions['A'].width = 25
+            dep_sheet.column_dimensions['B'].width = 25
+            dep_sheet.column_dimensions['C'].width = 15
+            
+            print("Added Policy Dependencies visualization sheet")
+            return True
+        return False
+    except Exception as e:
+        print(f"Error adding dependency sheet: {str(e)}")
+        return False
+
+def add_version_sheet(workbook, version=TEMPLATE_VERSION):
+    """Add or update a version sheet to track template changes.
+    
+    Args:
+        workbook: The Excel workbook to add the version sheet to
+        version: The version string to add to the sheet
+    """
+    try:
+        # Check if Version sheet exists
+        if "Version" not in workbook.sheetnames:
+            # Create the sheet
+            version_sheet = workbook.create_sheet("Version")
+            # Add headers
+            headers = ["Version", "Date", "Description", "Author"]
+            for col, header in enumerate(headers, 1):
+                cell = version_sheet.cell(row=1, column=col, value=header)
+                cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
+                cell.font = Font(color='FFFFFF', bold=True)
+            
+            # Set column widths
+            version_sheet.column_dimensions['A'].width = 10
+            version_sheet.column_dimensions['B'].width = 15
+            version_sheet.column_dimensions['C'].width = 50
+            version_sheet.column_dimensions['D'].width = 20
+            
+            # Add first entry
+            version_sheet.cell(row=2, column=1, value=version)
+            version_sheet.cell(row=2, column=2, value=datetime.datetime.now().strftime("%Y-%m-%d"))
+            version_sheet.cell(row=2, column=3, value="Initial template creation with dynamic organization and server dropdowns")
+            version_sheet.cell(row=2, column=4, value=os.environ.get('USER', 'Intersight-Admin'))
+        else:
+            # Update existing version sheet with new entry
+            version_sheet = workbook["Version"]
+            next_row = version_sheet.max_row + 1
+            version_sheet.cell(row=next_row, column=1, value=version)
+            version_sheet.cell(row=next_row, column=2, value=datetime.datetime.now().strftime("%Y-%m-%d"))
+            version_sheet.cell(row=next_row, column=3, value="Updated template with latest organizations and servers")
+            version_sheet.cell(row=next_row, column=4, value=os.environ.get('USER', 'Intersight-Admin'))
+        
+        return True
+    except Exception as e:
+        print(f"Error adding version sheet: {str(e)}")
+        return False
 
 def get_intersight_info(api_client, excel_file):
     """Get information from Intersight and update the Excel file"""
@@ -1535,30 +1876,58 @@ def get_intersight_info(api_client, excel_file):
         if 'Profiles' in workbook.sheetnames:
             profiles_sheet = workbook['Profiles']
             
-            # Remove all existing data validations
+            # Clear all validations
             profiles_sheet.data_validations.dataValidation = []
             
-            # Add server dropdown
-            server_options = [f"{server.name} | SN: {server.serial}" for server in servers.results]
-            server_formula = '"' + ','.join(server_options) + '"'
-            server_validation = DataValidation(
-                type='list',
-                formula1=server_formula,
-                allow_blank=True
-            )
-            server_validation.add('E2:E1000')  # Apply to Server column
-            profiles_sheet.add_data_validation(server_validation)
+            # Re-add existing non-org validations
+            existing_dv = []
+            org_dv_found = False
             
-            # Add deploy dropdown
-            deploy_validation = DataValidation(
-                type='list',
-                formula1='"Yes,No"',
-                allow_blank=True
-            )
-            deploy_validation.add('G2:G1000')  # Apply to Deploy column
-            profiles_sheet.add_data_validation(deploy_validation)
+            for dv in list(profiles_sheet.data_validations.dataValidation):
+                # Check if this is an organization dropdown
+                is_org_dv = False
+                for cell_range in dv.sqref:
+                    if str(cell_range).startswith('C'):
+                        # This is the org dropdown, update it
+                        dv.formula1 = f'"{",".join(org_names)}"'
+                        org_dv_found = True
+                        is_org_dv = True
+                        break
+                
+                # Keep all non-org dropdowns
+                if not is_org_dv:
+                    existing_dv.append(dv)
             
-            # Add organization dropdown
+            # Clear and re-add all validations
+            profiles_sheet.data_validations.dataValidation = []
+            
+            # Re-add existing non-org validations
+            for dv in existing_dv:
+                profiles_sheet.add_data_validation(dv)
+            
+            # Add server dropdown if not found
+            if not any(any(str(cell).startswith('E') for cell in dv.sqref) for dv in existing_dv):
+                server_options = [f"{server.name} | SN: {server.serial}" for server in servers.results]
+                server_formula = '"' + ','.join(server_options) + '"'
+                server_validation = DataValidation(
+                    type='list',
+                    formula1=server_formula,
+                    allow_blank=True
+                )
+                server_validation.add('E2:E1000')  # Apply to Server column
+                profiles_sheet.add_data_validation(server_validation)
+            
+            # Add deploy dropdown if not found
+            if not any(any(str(cell).startswith('G') for cell in dv.sqref) for dv in existing_dv):
+                deploy_validation = DataValidation(
+                    type='list',
+                    formula1='"Yes,No"',
+                    allow_blank=True
+                )
+                deploy_validation.add('G2:G1000')  # Apply to Deploy column
+                profiles_sheet.add_data_validation(deploy_validation)
+            
+            # Always create fresh organization dropdown with latest data
             org_validation = DataValidation(
                 type='list',
                 formula1=f'"{",".join(org_names)}"',
@@ -1567,7 +1936,7 @@ def get_intersight_info(api_client, excel_file):
             org_validation.add('C2:C1000')  # Apply to Organization column range
             profiles_sheet.add_data_validation(org_validation)
             
-            print("Added dropdowns for Server, Deploy, and Organization columns")
+            print("Added/Updated dropdowns for Server, Deploy, and Organization columns")
         
         # Set up dropdowns for all sheets
         # Pools sheet dropdown
@@ -1582,18 +1951,12 @@ def get_intersight_info(api_client, excel_file):
             pool_validation.add('A2:A1000')  # Apply to Pool Types column
             pools_sheet.add_data_validation(pool_validation)
             print("Added dropdown for Pool Types in Pools sheet")
-
+        
         # Policies sheet dropdown
         if 'Policies' in workbook.sheetnames:
             policies_sheet = workbook['Policies']
-            policy_types = ['vNIC', 'BIOS', 'BOOT', 'QoS', 'Storage']
-            policy_validation = DataValidation(
-                type='list',
-                formula1=f'"{",".join(policy_types)}"',
-                allow_blank=True
-            )
-            policy_validation.add('A2:A1000')  # Apply to Policy Types column
-            policies_sheet.add_data_validation(policy_validation)
+            
+            # Always create fresh organization dropdown with latest data
             org_validation = DataValidation(
                 type='list',
                 formula1=f'"{",".join(org_names)}"',
@@ -1601,22 +1964,23 @@ def get_intersight_info(api_client, excel_file):
             )
             org_validation.add('D2:D1000')  # Apply to Organizations columns
             policies_sheet.add_data_validation(org_validation)
-            print("Added dropdowns for Policy Types and Organizations in Policies sheet")
-
+            
+            if not org_dv_found:
+                org_validation = DataValidation(
+                    type='list',
+                    formula1=f'"{",".join(org_names)}"',
+                    allow_blank=True
+                )
+                org_validation.add('D2:D1000')  # Apply to Organizations columns
+                policies_sheet.add_data_validation(org_validation)
+            
+            print("Added/Updated dropdowns for Policy Types and Organizations in Policies sheet")
+        
         # Template sheet dropdowns
         if 'Template' in workbook.sheetnames:
             template_sheet = workbook['Template']
-            platform_types = ['FIAttached', 'Standalone']
-            platform_validation = DataValidation(
-                type='list',
-                formula1=f'"{",".join(platform_types)}"',
-                allow_blank=True
-            )
-            platform_validation.add('D2:D1000')  # Apply to Platform Types column
-            template_sheet.add_data_validation(platform_validation)
-            print("Added dropdown for Platform Types in Template sheet")
-
-            # Add organization dropdown to column B
+            
+            # Always create fresh organization dropdown with latest data
             org_validation = DataValidation(
                 type='list',
                 formula1=f'"{",".join(org_names)}"',
@@ -1624,7 +1988,29 @@ def get_intersight_info(api_client, excel_file):
             )
             org_validation.add('B2:B1000')  # Apply to Organizations column
             template_sheet.add_data_validation(org_validation)
-            print("Added dropdowns for Platform Types and Organizations in Template sheet")
+            
+            
+            # Add organization dropdown if not found
+            if not org_dv_found:
+                org_validation = DataValidation(
+                    type='list',
+                    formula1=f'"{",".join(org_names)}"',
+                    allow_blank=True
+                )
+                org_validation.add('B2:B1000')  # Apply to Organizations column
+                template_sheet.add_data_validation(org_validation)
+            
+            # Reapply target platform dropdown to column D in Template sheet
+            platform_validation = DataValidation(
+                type='list',
+                formula1='"FIAttached,Standalone"',
+                allow_blank=True
+            )
+            template_sheet.add_data_validation(platform_validation)
+            platform_validation.add('D2:D1000')  # Column D
+            print("Reapplied dropdown for Target Platform in Template sheet")
+            
+            print("Added/Updated dropdowns for Platform Types and Organizations in Template sheet")
         
         # Save workbook
         print("\nSaving Excel file...")
@@ -2109,6 +2495,11 @@ if __name__ == "__main__":
         api_client = get_api_client()
         if not api_client:
             sys.exit(1)
+        
+        # Automatically retrieve organization and server information first
+        print('\n--- Automatically retrieving organization and server information from Intersight ---')
+        get_intersight_info(api_client, args.file)
+        print('--- Finished retrieving Intersight information ---\n')
         
         if args.action in ['push', 'all']:
             process_foundation_template(args.file)

@@ -1,0 +1,35 @@
+name: Intersight Automation
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  intersight-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Configure Intersight credentials
+        env:
+          INTERSIGHT_API_KEY_ID: ${{ secrets.INTERSIGHT_API_KEY_ID }}
+          INTERSIGHT_PRIVATE_KEY: ${{ secrets.INTERSIGHT_PRIVATE_KEY }}
+        run: |
+          echo "$INTERSIGHT_PRIVATE_KEY" > SecretKey.txt
+          
+      - name: Run Intersight workflow
+        run: |
+          python create_intersight_foundation.py --action all --file output/Intersight_Foundation.xlsx

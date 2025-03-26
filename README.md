@@ -22,6 +22,7 @@ This project provides tools to interact with Cisco Intersight, including:
 - Update existing Excel files with pre-configured settings
 - **NEW: Update Excel templates with dynamic dropdowns populated from your Intersight instance**
 - Import templates from Excel to Intersight
+- **Dynamic Dropdowns**: Automatically populate Excel dropdowns with data from your Intersight instance, including organizations and servers.
 
 ## Setup
 
@@ -128,6 +129,22 @@ This command will:
 2. Retrieve all available organizations and policies
 3. Update your Excel template with dropdowns containing these options
 4. Allow you to select from valid options when configuring templates
+
+### Setup Excel Template
+
+Generate and set up the Excel template for UCS Server Profile templates:
+
+```bash
+python3 create_intersight_foundation.py --action setup --file output/Intersight_Foundation.xlsx
+```
+
+### Update Excel with Intersight Data
+
+Fetch data from Intersight and update the Excel template with dynamic dropdowns:
+
+```bash
+python3 create_intersight_foundation.py --action get-info --file output/Intersight_Foundation.xlsx
+```
 
 ### Excel to Intersight Integration
 
