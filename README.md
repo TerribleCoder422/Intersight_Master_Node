@@ -1,28 +1,30 @@
 # Automate-Intersight
 
-A Python project for automating Cisco Intersight operations, including UCS Server Profile template management via Excel.
+A Python project for automating Cisco Intersight operations, including pools, policies, templates, and server profiles via standardized Excel templates.
 
 ## Overview
 
-This project provides tools to interact with Cisco Intersight, including:
+This project provides tools to interact with Cisco Intersight, offering a full-cycle workflow to:
 
-1. Authentication with Intersight API
-2. Creating and managing UCS Server Profile templates
-3. Excel-based template creation and management
-4. Pre-configured templates for specific use cases (e.g., OpenShift masternodes)
+1. Create an Excel template with pre-populated data
+2. Retrieve and populate the template with current Intersight data
+3. Allow customization of the template
+4. Push the configuration to Intersight, creating all necessary components
 
 ## Features
 
 - **Authentication**: Secure authentication with Intersight using API keys
-- **Excel Template**: Create UCS Server Profile templates using Excel
-- **Profile Management**: View and manage UCS Server Profiles
-- **Pre-configured Templates**: Ready-to-use templates for common deployment scenarios
-- Create Excel templates for UCS Server Profile templates
-- Create pre-configured templates for specific use cases (e.g., OpenShift masternodes)
-- Update existing Excel files with pre-configured settings
-- **NEW: Update Excel templates with dynamic dropdowns populated from your Intersight instance**
-- Import templates from Excel to Intersight
-- **Dynamic Dropdowns**: Automatically populate Excel dropdowns with data from your Intersight instance, including organizations and servers.
+- **Standardized Templates**: Automatically generate Excel templates with consistent naming (AI_POD_master_Template.xlsx)
+- **Default Organization**: Templates are pre-configured with "default" organization for consistency
+- **Pool Management**: Create and manage MAC, UUID, and other pools
+- **Policy Management**: Create and manage BIOS, Boot, vNIC, Storage and other policies
+- **Template Management**: Create and manage UCS Server Profile templates
+- **Profile Management**: Create, deploy and manage UCS Server Profiles
+- **Progress Tracking**: Visual progress indicators and color-coded outputs
+- **Smart Template Matching**: Flexible name matching to find templates in Intersight
+- **Dynamic Dropdowns**: Automatically populate Excel dropdowns with data from your Intersight instance
+- **Data Validation**: Validate required fields before pushing to Intersight
+- **Error Handling**: Comprehensive error handling with clear messages
 
 ## Setup
 
@@ -132,18 +134,36 @@ This command will:
 
 ### Setup Excel Template
 
-Generate and set up the Excel template for UCS Server Profile templates:
+Generate and set up the standardized Excel template for Intersight configurations:
 
 ```bash
-python3 create_intersight_foundation.py --action setup --file output/Intersight_Foundation.xlsx
+python3 create_intersight_foundation.py --action setup --file dummy.xlsx
 ```
+
+Note: This will always create `output/AI_POD_master_Template.xlsx` regardless of the filename provided.
 
 ### Update Excel with Intersight Data
 
 Fetch data from Intersight and update the Excel template with dynamic dropdowns:
 
 ```bash
-python3 create_intersight_foundation.py --action get-info --file output/Intersight_Foundation.xlsx
+python3 create_intersight_foundation.py --action get-info --file output/AI_POD_master_Template.xlsx
+```
+
+### Push Configuration to Intersight
+
+Create pools, policies, templates and profiles in Intersight based on the Excel template:
+
+```bash
+python3 create_intersight_foundation.py --action push --file output/AI_POD_master_Template.xlsx
+```
+
+### Update Server Information
+
+Refresh the list of available servers in your Excel template:
+
+```bash
+python3 create_intersight_foundation.py --action update-servers --file output/AI_POD_master_Template.xlsx
 ```
 
 ### Excel to Intersight Integration
