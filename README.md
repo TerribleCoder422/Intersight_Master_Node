@@ -39,98 +39,14 @@ This project provides tools to interact with Cisco Intersight, offering a full-c
 
 ## Usage
 
-### Authentication Test
+### Complete Workflow
 
-Run the authentication test script to verify connectivity:
+The recommended workflow consists of the following steps:
 
-```bash
-python3 src/main.py auth
-```
-
-### Excel Template Creation
-
-Generate the Excel template for UCS Server Profile templates:
-
-```bash
-python3 src/main.py create-template
-```
-
-This will create an Excel file in the `output` directory with the following tabs:
-- **Template**: For creating UCS Server Profile templates
-- **Profiles**: For viewing and managing UCS Server Profiles
-
-### Create a blank Excel template
-
-```bash
-python3 src/main.py create-template --output template.xlsx
-```
-
-### Create a pre-configured masternode template
-
-```bash
-python3 src/main.py create-masternode --output masternode_template.xlsx
-```
-
-### Pre-configured Templates
-
-Generate pre-configured templates for specific use cases:
-
-#### OpenShift Masternode Template
-
-```bash
-python3 src/main.py create-masternode
-```
-
-This creates a template with the following OpenShift masternode configuration:
-
-- **Boot Order**: PXE → Local Disk
-- **vNICs**:
-  - 2 vNICs (one per UCS fabric interconnect)
-  - VLANs for OpenShift Management, API, and etcd traffic
-  - MAC Address Pool assigned
-- **vHBAs** (If using SAN storage):
-  - 2 vHBAs (one per fabric)
-  - WWPN pool assigned
-- **BIOS Policy**:
-  - Performance Mode enabled
-  - CPU C-States disabled (for stability)
-  - VT-x enabled for virtualization
-- **Boot Policy**:
-  - PXE for initial deployment (Ignition)
-  - Local disk boot after installation
-- **vMedia Policy**:
-  - Optional OpenShift boot ISO for manual deployment
-- **QoS Policy**:
-  - High priority for control plane traffic
-- **Storage**:
-  - 1 x SSD/NVMe for OS
-  - 1 x Disk for etcd data (if running etcd on nodes)
-
-### Update Existing Excel File with Masternode Configuration
-
-You can also update an existing Excel file with the masternode configuration:
-
-```bash
-python3 src/main.py update-with-masternode --input path/to/your/excel/file.xlsx
-```
-
-This will add the masternode configuration to the specified Excel file, including:
-- Setting the template name to "MasterNode-Template"
-- Configuring all policies for OpenShift deployment
-- Setting up vNICs and vHBAs
-- Adding a Documentation tab with detailed specifications
-
-### Update Excel with dynamic dropdowns from Intersight
-
-```bash
-python3 src/main.py update-with-intersight-data --input path/to/your/excel/file.xlsx
-```
-
-This command will:
-1. Connect to your Intersight instance
-2. Retrieve all available organizations and policies
-3. Update your Excel template with dropdowns containing these options
-4. Allow you to select from valid options when configuring templates
+1. Create a standardized template
+2. Populate it with Intersight data
+3. Modify the template as needed
+4. Push the configuration to Intersight
 
 ### Setup Excel Template
 
@@ -141,6 +57,25 @@ python3 create_intersight_foundation.py --action setup --file dummy.xlsx
 ```
 
 Note: This will always create `output/AI_POD_master_Template.xlsx` regardless of the filename provided.
+
+The standardized template includes:
+
+- **Pool Management**:
+  - MAC Pools for both fabrics
+  - UUID Pool for server identification
+
+- **Policy Management**:
+  - BIOS Policy for performance optimization
+  - vNIC Policies for network connectivity
+  - QoS Policy for traffic prioritization
+  - Storage Policy for disk configuration
+
+- **Template Configuration**:
+  - Default organization setting
+  - Profile template definitions
+  - Server assignment options
+
+### Update Excel with Intersight Data
 
 ### Update Excel with Intersight Data
 
@@ -166,16 +101,9 @@ Refresh the list of available servers in your Excel template:
 python3 create_intersight_foundation.py --action update-servers --file output/AI_POD_master_Template.xlsx
 ```
 
-### Excel to Intersight Integration
+## Working with the Excel Template
 
-Use the Excel to Intersight integration script to:
-- Read template data from Excel
-- Create templates in Intersight
-- Update the Excel with data from Intersight
-
-```bash
-python3 src/main.py import-template --input output/masternode_template.xlsx
-```
+After generating the template, you can manually edit it to customize your configurations before pushing to Intersight.
 
 ## Excel Template Structure
 
