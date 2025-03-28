@@ -28,14 +28,75 @@ This project provides tools to interact with Cisco Intersight, offering a full-c
 
 ## Setup
 
-1. Install dependencies:
+### Prerequisites
+
+1. Python 3.7 or later installed on your system
+2. Access to Cisco Intersight with API keys
+3. Basic knowledge of Intersight resources (organizations, pools, policies)
+
+### Installation for Windows PC
+
+1. Clone this repository to your PC:
+   ```bash
+   git clone https://github.com/TerribleCoder422/Intersight_Master_Node.git
+   cd Intersight_Master_Node
+   ```
+
+2. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 
-2. Configure your Intersight API credentials:
-   - API Key ID
-   - Private Key
+3. Set up your Intersight API credentials:
+   - Create a `.env` file in the root directory by copying `.env.example`
+   - In Intersight, generate an API key and download the private key file
+   - Update the `.env` file with your API key ID and path to your private key file
+
+   Example `.env` file:
+   ```
+   INTERSIGHT_API_KEY_ID=12345abcde12345abcde
+   INTERSIGHT_PRIVATE_KEY_FILE=.\secret.key
+   INTERSIGHT_BASE_URL=https://intersight.com
+   ```
+
+4. Verify connectivity by running the setup command:
+   ```bash
+   python create_intersight_foundation.py --action setup --file dummy.xlsx
+   ```
+   
+   If successful, you should see a new file created at `output/AI_POD_master_Template.xlsx`
+
+### Installation for macOS
+
+1. Clone this repository to your Mac:
+   ```bash
+   git clone https://github.com/TerribleCoder422/Intersight_Master_Node.git
+   cd Intersight_Master_Node
+   ```
+
+2. Install dependencies:
+   ```bash
+   pip3 install -r requirements.txt
+   ```
+
+3. Set up your Intersight API credentials:
+   - Create a `.env` file in the root directory by copying `.env.example`
+   - In Intersight, generate an API key and download the private key file
+   - Update the `.env` file with your API key ID and path to your private key file
+
+   Example `.env` file:
+   ```
+   INTERSIGHT_API_KEY_ID=12345abcde12345abcde
+   INTERSIGHT_PRIVATE_KEY_FILE=./secret.key
+   INTERSIGHT_BASE_URL=https://intersight.com
+   ```
+
+4. Verify connectivity by running the setup command:
+   ```bash
+   python3 create_intersight_foundation.py --action setup --file dummy.xlsx
+   ```
+   
+   If successful, you should see a new file created at `output/AI_POD_master_Template.xlsx`
 
 ## Usage
 
