@@ -34,6 +34,20 @@ This project provides tools to interact with Cisco Intersight, offering a full-c
 2. Access to Cisco Intersight with API keys
 3. Basic knowledge of Intersight resources (organizations, pools, policies)
 
+### Dependencies
+
+This tool requires the following key Python packages:
+
+- **intersight**: Cisco Intersight API client
+- **pandas**: For data manipulation and Excel handling
+- **openpyxl**: For Excel file creation and modification
+- **requests**: For API communication
+- **cryptography**: For Intersight authentication
+- **tqdm**: For progress bars
+- **colorama/termcolor**: For colored console output
+
+All dependencies are listed in the `requirements.txt` file and will be installed automatically with the installation commands below.
+
 ### Installation for Windows PC
 
 1. Clone this repository to your PC:
