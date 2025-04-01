@@ -94,6 +94,60 @@ def add_template_mapping(original_name, unique_name):
     template_mappings[original_name] = unique_name
     print(f"Added template mapping: {original_name} -> {unique_name}")
 
+
+def auto_adjust_column_width(worksheet, min_width=15, padding=2, custom_width_map=None, sheet_name=None):
+    """
+    Automatically adjust column widths based on content.
+    
+    Args:
+        worksheet: The worksheet to adjust
+        min_width: Minimum width for all columns
+        padding: Extra characters to add for padding
+        custom_width_map: Dictionary of column letters and their minimum widths
+        sheet_name: Optional name of the sheet for logging purposes
+    """
+    if custom_width_map is None:
+        custom_width_map = {}
+    
+    # Get actual sheet name if not provided
+    if not sheet_name and hasattr(worksheet, 'title'):
+        sheet_name = worksheet.title
+    
+    adjusted_columns = []
+    for column in worksheet.columns:
+        col_letter = get_column_letter(column[0].column)
+        # Calculate max length of content in the column
+        max_length = 0
+        for cell in column:
+            if cell.value:
+                # Handle different data types
+                if isinstance(cell.value, (int, float)):
+                    cell_len = len(str(cell.value))
+                elif isinstance(cell.value, str):
+                    cell_len = len(cell.value)
+                elif isinstance(cell.value, (datetime.datetime, datetime.date)):
+                    cell_len = len(cell.value.strftime('%Y-%m-%d %H:%M:%S'))
+                else:
+                    cell_len = len(str(cell.value))
+                max_length = max(max_length, cell_len)
+        
+        # Get minimum width from custom map or use default
+        col_min_width = custom_width_map.get(col_letter, min_width)
+        
+        # Set the column width (content length + padding, but at least min_width)
+        adjusted_width = max(max_length + padding, col_min_width)
+        worksheet.column_dimensions[col_letter].width = adjusted_width
+        adjusted_columns.append(col_letter)
+    
+    # Output message about auto-formatted columns
+    if adjusted_columns:
+        if sheet_name:
+            print(f"Auto-adjusted column widths in {sheet_name} sheet: {', '.join(adjusted_columns)}")
+        else:
+            print(f"Auto-adjusted column widths: {', '.join(adjusted_columns)}")
+    
+    return adjusted_columns
+
 # Configuration presets for common deployments
 CONFIGURATION_PRESETS = {
     "VMware ESXi": {
@@ -1388,12 +1442,8 @@ def add_template_sheet(excel_file, api_client):
             'H': 20   # Storage Policy
         }
         
-        for column in template_sheet.columns:
-            col_letter = get_column_letter(column[0].column)
-            max_length = max((len(str(cell.value or "")) for cell in column))
-            min_width = min_widths.get(col_letter, 15)
-            adjusted_width = max(max_length + 2, min_width)
-            template_sheet.column_dimensions[col_letter].width = adjusted_width
+        # Use the auto-adjust function
+        auto_adjust_column_width(template_sheet, min_width=15, padding=2, custom_width_map=min_widths, sheet_name="Templates")
         
         # Save the workbook
         workbook.save(excel_file)
@@ -1663,12 +1713,8 @@ def add_profiles_sheet(excel_file, api_client):
             'G': 10   # Deploy
         }
         
-        for column in profiles_sheet.columns:
-            col_letter = get_column_letter(column[0].column)
-            max_length = max((len(str(cell.value or "")) for cell in column))
-            min_width = min_widths.get(col_letter, 15)
-            adjusted_width = max(max_length + 2, min_width)
-            profiles_sheet.column_dimensions[col_letter].width = adjusted_width
+        # Use the auto-adjust function
+        auto_adjust_column_width(profiles_sheet, min_width=15, padding=2, custom_width_map=min_widths, sheet_name="Profiles")
         
         return True
         
@@ -1947,10 +1993,20 @@ def setup_excel_file(api_client, excel_file):
         pools_sheet = workbook.active
         pools_sheet.title = 'Pools'
         headers = ["Pool Type*", "Pool Name*", "Description", "Start Address*", "Size*"]
+        
+        # Define styles
+        header_fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True)
+        required_font = Font(color='FF0000', bold=True)
+        
         for col, header in enumerate(headers, 1):
             cell = pools_sheet.cell(row=1, column=col, value=header)
-            cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
-            cell.font = Font(color='FFFFFF', bold=True)
+            cell.fill = header_fill
+            # Use red font for required headers (marked with *)
+            if '*' in header:
+                cell.font = required_font
+            else:
+                cell.font = header_font
         
         # Add sample pool data
         sample_pools = [
@@ -1967,10 +2023,16 @@ def setup_excel_file(api_client, excel_file):
         # Set up Policies sheet
         policies_sheet = workbook.create_sheet('Policies')
         policies_headers = ["Policy Type*", "Policy Name*", "Description", "Organization*"]
+        
+        # Reuse the style variables from the Pools sheet
         for col, header in enumerate(policies_headers, 1):
             cell = policies_sheet.cell(row=1, column=col, value=header)
-            cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
-            cell.font = Font(color='FFFFFF', bold=True)
+            cell.fill = header_fill
+            # Use red font for required headers (marked with *)
+            if '*' in header:
+                cell.font = required_font
+            else:
+                cell.font = header_font
         
         # Add sample policy data
         sample_policies = [
@@ -2034,8 +2096,10 @@ def setup_excel_file(api_client, excel_file):
             if '*' in header:
                 cell.font = Font(color='FF0000', bold=True)
         
-        # Add example profile data
-        profiles_sheet.append(['AI-Server-01', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', 'Production AI POD Host', 'No'])
+        # Add 8 profile templates with Deploy set to No
+        for i in range(1, 9):
+            profiles_sheet.append([f'AI-Server-{i:02d}', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', f'Production AI POD Host {i}', 'No'])
+        print("Added 8 profile templates to the Profiles sheet")
         
         # Get servers from Intersight
         compute_api_instance = compute_api.ComputeApi(api_client)
@@ -2130,13 +2194,17 @@ def setup_excel_file(api_client, excel_file):
                 row += 1
             
             # Set column widths
-            presets_sheet.column_dimensions['A'].width = 25
-            presets_sheet.column_dimensions['B'].width = 20
-            presets_sheet.column_dimensions['C'].width = 20
-            presets_sheet.column_dimensions['D'].width = 20
-            presets_sheet.column_dimensions['E'].width = 20
-            presets_sheet.column_dimensions['F'].width = 20
-            presets_sheet.column_dimensions['G'].width = 50
+            min_widths = {
+                'A': 25,  # Category
+                'B': 20,  # Template Name
+                'C': 20,  # BIOS
+                'D': 20,  # Boot
+                'E': 20,  # LAN
+                'F': 20,  # SAN
+                'G': 50   # Description
+            }
+            # Use the auto-adjust function
+            auto_adjust_column_width(presets_sheet, min_width=15, padding=2, custom_width_map=min_widths, sheet_name="Presets")
             
             print("Added Configuration Presets sheet with VMware, Windows, and RedHat templates")
 
@@ -2188,10 +2256,20 @@ def create_template_excel(excel_file):
     pools_sheet = workbook.active
     pools_sheet.title = 'Pools'
     headers = ["Pool Type*", "Pool Name*", "Description", "Start Address*", "Size*"]
+    
+    # Define styles
+    header_fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
+    header_font = Font(color='FFFFFF', bold=True)
+    required_font = Font(color='FF0000', bold=True)
+    
     for col, header in enumerate(headers, 1):
         cell = pools_sheet.cell(row=1, column=col, value=header)
-        cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
-        cell.font = Font(color='FFFFFF', bold=True)
+        cell.fill = header_fill
+        # Use red font for required headers (marked with *)
+        if '*' in header:
+            cell.font = required_font
+        else:
+            cell.font = header_font
     
     # Add sample pool data
     sample_pools = [
@@ -2206,10 +2284,16 @@ def create_template_excel(excel_file):
     # Set up Policies sheet - get the already created sheet
     policies_sheet = workbook['Policies']
     policies_headers = ["Policy Type*", "Policy Name*", "Description", "Organization*"]
+    
+    # Reuse the style variables defined for Pools sheet
     for col, header in enumerate(policies_headers, 1):
         cell = policies_sheet.cell(row=1, column=col, value=header)
-        cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
-        cell.font = Font(color='FFFFFF', bold=True)
+        cell.fill = header_fill
+        # Use red font for required headers (marked with *)
+        if '*' in header:
+            cell.font = required_font
+        else:
+            cell.font = header_font
     
     # Add sample policy data
     sample_policies = [
@@ -2280,8 +2364,10 @@ def create_template_excel(excel_file):
         cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
         cell.font = Font(color='FFFFFF', bold=True)
     
-    # Add sample profile data with Deploy set to No
-    profiles_sheet.append(['AI-Server-', '1', 'Gruve', 'Ai_Pod_Template', '', 'AI POD Server Profile', 'No'])
+    # Add 8 sample profile templates with Deploy set to No
+    for i in range(1, 9):
+        profiles_sheet.append([f'AI-Server-{i:02d}', 'AI POD Host Profile', 'default', 'Ai_POD_Template', '', f'Production AI POD Host {i}', 'No'])
+    print(f"Added 8 profile templates to the Profiles sheet")
     
     # Add data validation for Deploy column
     deploy_validation = DataValidation(type='list', formula1='"Yes,No"', allow_blank=True)
@@ -2386,9 +2472,13 @@ def add_dependency_sheet(workbook):
                     row += 1
             
             # Set column widths
-            dep_sheet.column_dimensions['A'].width = 25
-            dep_sheet.column_dimensions['B'].width = 25
-            dep_sheet.column_dimensions['C'].width = 15
+            min_widths = {
+                'A': 25,  # Policy Type
+                'B': 25,  # Policy Name
+                'C': 15   # Used By
+            }
+            # Use the auto-adjust function
+            auto_adjust_column_width(dep_sheet, min_width=15, padding=2, custom_width_map=min_widths)
             
             print("Added Policy Dependencies visualization sheet")
             return True
@@ -2417,14 +2507,18 @@ def add_version_sheet(workbook, version=TEMPLATE_VERSION):
                 cell.font = Font(color='FFFFFF', bold=True)
             
             # Set column widths
-            version_sheet.column_dimensions['A'].width = 10
-            version_sheet.column_dimensions['B'].width = 15
-            version_sheet.column_dimensions['C'].width = 50
-            version_sheet.column_dimensions['D'].width = 20
+            min_widths = {
+                'A': 10,  # Version
+                'B': 15,  # Date
+                'C': 50,  # Description
+                'D': 20   # Author
+            }
+            # Use the auto-adjust function
+            auto_adjust_column_width(version_sheet, min_width=10, padding=2, custom_width_map=min_widths)
             
             # Add first entry
             version_sheet.cell(row=2, column=1, value=version)
-            version_sheet.cell(row=2, column=2, value=datetime.datetime.now().strftime("%Y-%m-%d"))
+            version_sheet.cell(row=2, column=2, value=datetime.now().strftime("%Y-%m-%d"))
             version_sheet.cell(row=2, column=3, value="Initial template creation with dynamic organization and server dropdowns")
             version_sheet.cell(row=2, column=4, value=os.environ.get('USER', 'Intersight-Admin'))
         else:
@@ -2432,7 +2526,7 @@ def add_version_sheet(workbook, version=TEMPLATE_VERSION):
             version_sheet = workbook["Version"]
             next_row = version_sheet.max_row + 1
             version_sheet.cell(row=next_row, column=1, value=version)
-            version_sheet.cell(row=next_row, column=2, value=datetime.datetime.now().strftime("%Y-%m-%d"))
+            version_sheet.cell(row=next_row, column=2, value=datetime.now().strftime("%Y-%m-%d"))
             version_sheet.cell(row=next_row, column=3, value="Updated template with latest organizations and servers")
             version_sheet.cell(row=next_row, column=4, value=os.environ.get('USER', 'Intersight-Admin'))
         
@@ -2625,6 +2719,54 @@ def get_intersight_info(api_client, excel_file):
             
             print("Added/Updated dropdowns for Platform Types and Organizations in Template sheet")
         
+        # Auto-adjust column widths for all sheets before saving
+        print("\nAuto-adjusting column widths...")
+        if 'Profiles' in workbook.sheetnames:
+            min_widths = {
+                'A': 20,  # Profile Name
+                'B': 30,  # Description
+                'C': 15,  # Organization
+                'D': 20,  # Template Name
+                'E': 60,  # Server Assignment
+                'F': 30,  # Description
+                'G': 10   # Deploy
+            }
+            auto_adjust_column_width(workbook['Profiles'], min_width=15, padding=2, custom_width_map=min_widths, sheet_name="Profiles")
+            
+        if 'Template' in workbook.sheetnames:
+            min_widths = {
+                'A': 20,  # Template Name
+                'B': 15,  # Organization
+                'C': 30,  # Description
+                'D': 15,  # Target Platform
+                'E': 20,  # BIOS Policy
+                'F': 20,  # Boot Policy
+                'G': 25,  # LAN Connectivity Policy
+                'H': 20   # Storage Policy
+            }
+            auto_adjust_column_width(workbook['Template'], min_width=15, padding=2, custom_width_map=min_widths, sheet_name="Templates")
+        
+        if 'Pools' in workbook.sheetnames:
+            min_widths = {
+                'A': 15,  # Type
+                'B': 20,  # Name
+                'C': 30,  # Description
+                'D': 15,  # Assignment Order
+                'E': 15,  # From
+                'F': 15   # To
+            }
+            auto_adjust_column_width(workbook['Pools'], min_width=15, padding=2, custom_width_map=min_widths, sheet_name="Pools")
+        
+        if 'Policies' in workbook.sheetnames:
+            min_widths = {
+                'A': 20,  # Type
+                'B': 20,  # Name
+                'C': 30,  # Description
+                'D': 15,  # Organization
+                'E': 40,  # Settings
+            }
+            auto_adjust_column_width(workbook['Policies'], min_width=15, padding=2, custom_width_map=min_widths, sheet_name="Policies")
+            
         # Save workbook
         print("\nSaving Excel file...")
         workbook.save(excel_file)
