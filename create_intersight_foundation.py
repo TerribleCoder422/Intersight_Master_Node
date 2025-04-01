@@ -7,9 +7,22 @@ This template follows Intersight's configuration structure and includes dropdown
 import pandas as pd
 import os
 import json
+import traceback
 import intersight
+import requests
+import time
+import base64
+import hashlib
+import hmac
+import urllib.parse
+import logging
+import argparse
+import sys
+from tqdm import tqdm
+from colorama import Fore, Style, init
 from intersight.api_client import ApiClient
 from intersight.configuration import Configuration
+from intersight.rest import RESTResponse
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -19,6 +32,30 @@ from datetime import datetime
 import functools
 import concurrent.futures
 from typing import Dict, List, Any, Tuple, Optional
+
+# Initialize colorama for colored terminal output
+init(autoreset=True)
+
+# Set up logging
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"intersight_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+# Maximum number of retries for API calls
+MAX_RETRIES = 3
+# Delay between retries in seconds
+RETRY_DELAY = 2
 from intersight.api import (
     bios_api,
     boot_api,
@@ -35,11 +72,27 @@ from intersight.api import (
     vnic_api
 )
 
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
+
 # Cache for API results
 API_CACHE = {}
 
 # Current version of the template
 TEMPLATE_VERSION = "1.0.0"
+
+# Global dictionary to store template name mappings
+template_mappings = {}
+
+def add_template_mapping(original_name, unique_name):
+    """
+    Add a mapping between original template name and unique template name
+    """
+    template_mappings[original_name] = unique_name
+    print(f"Added template mapping: {original_name} -> {unique_name}")
 
 # Configuration presets for common deployments
 CONFIGURATION_PRESETS = {
@@ -205,13 +258,15 @@ def create_mac_pool(api_client, pool_data):
             print("Error: Gruve organization not found")
             return False
 
-        # Fetch organizations from Intersight
-        orgs_response = api_client.get_organizations()
-        org_names = [org['Name'] for org in orgs_response['Results']]
-
-        # Fetch servers from Intersight
-        servers_response = api_client.get_servers()
-        servers = servers_response['Results']
+        # Use organization API to fetch organizations
+        org_api = organization_api.OrganizationApi(api_client)
+        orgs = org_api.get_organization_organization_list()
+        org_names = [org.name for org in orgs.results]
+        
+        # Use compute API to fetch servers
+        compute_api_instance = compute_api.ComputeApi(api_client)
+        servers_list = compute_api_instance.get_compute_rack_unit_list()
+        servers = servers_list.results
         
         # Create organization reference
         org_ref = MoMoRef(
@@ -542,18 +597,423 @@ def move_sheet_after(workbook, sheet_to_move, target_sheet):
     for key, value in sheet.row_dimensions.items():
         new_sheet.row_dimensions[key] = copy(value)
 
+def create_server_template(api_client, template_data):
+    """
+    Create a Server Profile Template in Intersight
+    """
+    from intersight.api import server_api
+    from intersight.model.server_profile_template import ServerProfileTemplate
+    from intersight.model.mo_mo_ref import MoMoRef
+    import uuid
+    
+    try:
+        template_name = template_data['Template Name']
+        description = template_data.get('Description', '') if pd.notna(template_data.get('Description', '')) else ''
+        org_name = template_data['Organization']
+        target_platform = template_data['Target Platform']
+        bios_policy = template_data['BIOS Policy']
+        boot_policy = template_data['Boot Policy'] if pd.notna(template_data.get('Boot Policy', '')) else None
+        lan_policy = template_data['LAN Connectivity Policy']
+        storage_policy = template_data['Storage Policy']
+        
+        print(f"Creating server template: {template_name}")
+        print(f"Organization: {org_name}")
+        print(f"Target Platform: {target_platform}")
+        print(f"BIOS Policy: {bios_policy}")
+        if boot_policy:
+            print(f"Boot Policy: {boot_policy}")
+        else:
+            print("Boot Policy: None (optional)")
+        print(f"LAN Policy: {lan_policy}")
+        print(f"Storage Policy: {storage_policy}")
+        
+        # Get organization MOID
+        org_moid = get_org_moid(api_client, org_name)
+        if not org_moid:
+            print(f"Error: Organization {org_name} not found")
+            return False
+        
+        # Create a dictionary for the template
+        template_dict = {}
+        policy_bucket = []
+        
+        # Add the basic properties
+        template_dict['name'] = template_name + "_" + str(uuid.uuid4().hex)[:8]  # Make name unique to avoid conflicts
+        template_dict['description'] = description
+        template_dict['target_platform'] = target_platform
+        
+        # Add organization reference
+        template_dict['organization'] = MoMoRef(
+            class_id="mo.MoRef",
+            object_type="organization.Organization",
+            moid=org_moid
+        )
+        
+        # Get and add required policies
+        # BIOS Policy (required)
+        bios_policy_moid = get_policy_moid(api_client, "bios.Policy", bios_policy)
+        if not bios_policy_moid:
+            print(f"Error: BIOS policy {bios_policy} not found")
+            return False
+        policy_bucket.append(MoMoRef(
+            class_id="mo.MoRef",
+            object_type="bios.Policy",
+            moid=bios_policy_moid
+        ))
+        
+        # LAN Connectivity Policy (required)
+        lan_policy_moid = get_policy_moid(api_client, "vnic.LanConnectivityPolicy", lan_policy)
+        if not lan_policy_moid:
+            print(f"Error: LAN policy {lan_policy} not found")
+            return False
+        policy_bucket.append(MoMoRef(
+            class_id="mo.MoRef",
+            object_type="vnic.LanConnectivityPolicy",
+            moid=lan_policy_moid
+        ))
+        
+        # Storage Policy (required)
+        storage_policy_moid = get_policy_moid(api_client, "storage.StoragePolicy", storage_policy)
+        if not storage_policy_moid:
+            print(f"Error: Storage policy {storage_policy} not found")
+            return False
+        policy_bucket.append(MoMoRef(
+            class_id="mo.MoRef",
+            object_type="storage.StoragePolicy",
+            moid=storage_policy_moid
+        ))
+        
+        # Add Boot Policy only if specified and found
+        if boot_policy:
+            boot_policy_moid = get_policy_moid(api_client, "boot.PrecisionPolicy", boot_policy)
+            if boot_policy_moid:
+                policy_bucket.append(MoMoRef(
+                    class_id="mo.MoRef",
+                    object_type="boot.PrecisionPolicy",
+                    moid=boot_policy_moid
+                ))
+            else:
+                print(f"Warning: Boot policy {boot_policy} not found, continuing without boot policy")
+        
+        # Add policy bucket to template dictionary
+        template_dict['policy_bucket'] = policy_bucket
+        
+        # Create the server profile template using the dictionary
+        template = ServerProfileTemplate(**template_dict)
+        
+        # Create the template in Intersight
+        api_instance = server_api.ServerApi(api_client)
+        result = api_instance.create_server_profile_template(server_profile_template=template)
+        
+        print(f"Successfully created Server Template: {result.name}")
+        # Store the original name for future reference
+        add_template_mapping(template_name, result.name)
+        return True
+        
+    except Exception as e:
+        print(f"Error creating Server Template: {str(e)}")
+        traceback.print_exc()
+        return False
+
+def create_server_profile(api_client, profile_data):
+    """
+    Create a Server Profile in Intersight, using the built-in SDK methods
+    """
+    from intersight.api import server_api
+    from intersight.model.server_profile import ServerProfile
+    from intersight.model.mo_mo_ref import MoMoRef
+    
+    try:
+        profile_name = profile_data['Profile Name']
+        description = profile_data.get('Description', '') if pd.notna(profile_data.get('Description', '')) else ''
+        org_name = profile_data['Organization']
+        template_name = profile_data['Template Name']
+        server_info = profile_data.get('Server', '') if pd.notna(profile_data.get('Server', '')) else ''
+        deploy = profile_data.get('Deploy', 'No')
+        
+        print(f"Creating server profile: {profile_name}")
+        print(f"Organization: {org_name}")
+        print(f"Template: {template_name}")
+        print(f"Server: {server_info}")
+        print(f"Deploy: {deploy}")
+        
+        if deploy.lower() == "yes":
+            print(f"Note: The profile will be created but must be deployed manually in the Intersight UI.")
+        
+        # Get organization MOID
+        org_moid = get_org_moid(api_client, org_name)
+        if not org_moid:
+            print(f"Error: Organization {org_name} not found")
+            return False
+        
+        # Create organization reference
+        org_ref = MoMoRef(
+            class_id="mo.MoRef",
+            object_type="organization.Organization",
+            moid=org_moid
+        )
+        
+        # Get template MOID - Check if it's in our mappings first
+        if template_name in template_mappings:
+            mapped_name = template_mappings[template_name]
+            print(f"Found template mapping for {template_name} -> {mapped_name}")
+            template_moid = get_template_moid(api_client, mapped_name)
+        else:
+            template_moid = get_template_moid(api_client, template_name)
+        
+        if not template_moid:
+            print(f"Error: Template {template_name} not found")
+            return False
+            
+        # Create template reference
+        template_ref = MoMoRef(
+            class_id="mo.MoRef",
+            object_type="server.ProfileTemplate",
+            moid=template_moid
+        )
+        
+        # Parse server info (if provided)
+        server_moid = None
+        if server_info:
+            server_name = server_info.split(' | ')[0] if ' | ' in server_info else server_info
+            server_moid = get_server_moid(api_client, server_name)
+            if not server_moid:
+                print(f"Error: Server {server_name} not found")
+                return False
+        
+        # Create server reference if server_moid exists
+        server_ref = None
+        if server_moid:
+            server_ref = MoMoRef(
+                class_id="mo.MoRef",
+                object_type="compute.RackUnit",
+                moid=server_moid
+            )
+
+        try:
+            from intersight.model import server_profile
+            from intersight.api import server_api
+            
+            # Create API instance
+            api_instance = server_api.ServerApi(api_client)
+            
+            # Try a more direct approach using just the SDK's core methods
+            try:
+                # Create the profile with exactly matching property names from API docs
+                profile_min = {
+                    "Name": profile_name,
+                    "Organization": {
+                        "ClassId": "mo.MoRef",
+                        "ObjectType": "organization.Organization",
+                        "Moid": org_moid
+                    },
+                    "SrcTemplate": {
+                        "ClassId": "mo.MoRef",
+                        "ObjectType": "server.ProfileTemplate",
+                        "Moid": template_moid
+                    },
+                    "Type": "instance",  # API doc shows this is needed, values are 'instance' or 'template'
+                    "ClassId": "server.Profile",
+                    "ObjectType": "server.Profile"
+                }
+                
+                # Add server if specified
+                if server_moid:
+                    profile_min["AssignedServer"] = {
+                        "ClassId": "mo.MoRef",
+                        "ObjectType": "compute.RackUnit",
+                        "Moid": server_moid
+                    }
+                    
+                # Add description if provided
+                if description:
+                    profile_min["Description"] = description
+                
+                # Configure HTTP request args
+                local_var_params = {'server_profile': profile_min}
+                collection_formats = {}
+                path_params = {}
+                query_params = []
+                header_params = {}
+                form_params = []
+                local_var_files = {}
+                body_params = None
+                
+                # HTTP header `Accept`
+                header_params['Accept'] = api_client.select_header_accept(['application/json'])
+                # HTTP header `Content-Type`
+                header_params['Content-Type'] = api_client.select_header_content_type(['application/json'])
+                
+                # Authentication setting
+                auth_settings = ['cookieAuth', 'oAuth2']
+                body_params = local_var_params['server_profile']
+                
+                # Make direct call to API client
+                api_client.call_api(
+                    '/server/Profiles', 'POST',
+                    path_params,
+                    query_params,
+                    header_params,
+                    body=body_params,
+                    post_params=form_params,
+                    files=local_var_files,
+                    response_type='ServerProfile',
+                    auth_settings=auth_settings,
+                    async_req=False,
+                    _return_http_data_only=True,
+                    _preload_content=True,
+                    collection_formats=collection_formats)
+                
+                print(f"Successfully created Server Profile: {profile_name}")
+                if deploy.lower() == "yes":
+                    print(f"Please deploy the profile manually from the Intersight UI")
+                    
+            except Exception as api_error:
+                print(f"Error creating profile: {str(api_error)}")
+                print("\n⚠️ Unable to create server profile from template due to Intersight API limitations.")
+                print("This profile will need to be created manually in the Intersight UI.")
+                
+                # Store profile for manual creation report
+                if 'profiles_for_manual_creation' not in globals():
+                    global profiles_for_manual_creation
+                    profiles_for_manual_creation = []
+                
+                # Store info needed for manual creation
+                profile_info = {
+                    'name': profile_name,
+                    'template': template_name,
+                    'organization': org_name,
+                    'server': server_name,
+                    'deploy': deploy
+                }
+                profiles_for_manual_creation.append(profile_info)
+                
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error creating Server Profile: {str(e)}")
+            traceback.print_exc()
+            return False
+    
+    except Exception as e:
+        print(f"Error creating Server Profile: {str(e)}")
+        traceback.print_exc()
+        return False
+
+def get_template_moid(api_client, template_name):
+    """
+    Get the MOID of a server profile template by name with flexible matching
+    """
+    from intersight.api import server_api
+    
+    try:
+        # Check if there's a mapping entry for this template name
+        if template_name in template_mappings:
+            mapped_name = template_mappings[template_name]
+            print_info(f"Found template mapping for {template_name} -> {mapped_name}")
+            template_name = mapped_name
+        
+        # Create API instance
+        api_instance = server_api.ServerApi(api_client)
+        
+        # First try exact match
+        filter_str = f"Name eq '{template_name}'"
+        response = api_instance.get_server_profile_template_list(filter=filter_str)
+        
+        # Check if exact match template exists
+        if response.results and len(response.results) > 0:
+            print_success(f"Found exact match for template: {template_name}")
+            return response.results[0].moid
+            
+        # If exact match not found, try case-insensitive search
+        print_info(f"Exact match for '{template_name}' not found, trying flexible matching...")
+        
+        # Get all templates and search for a close match
+        all_templates = api_instance.get_server_profile_template_list()
+        
+        # Flexible matching options (in order of preference):
+        # 1. Exact match (already tried above)
+        # 2. Case-insensitive exact match
+        # 3. Template name starts with our search term
+        # 4. Template name contains our search term
+        template_matches = []
+        
+        if all_templates.results:
+            template_name_lower = template_name.lower()
+            
+            for tmpl in all_templates.results:
+                # Case-insensitive exact match
+                if tmpl.name.lower() == template_name_lower:
+                    print_success(f"Found case-insensitive match: {tmpl.name}")
+                    return tmpl.moid
+                
+                # Template name starts with our search term
+                if tmpl.name.lower().startswith(template_name_lower):
+                    template_matches.append((1, tmpl))  # Priority 1
+                    continue
+                    
+                # Template name contains our search term
+                if template_name_lower in tmpl.name.lower():
+                    template_matches.append((2, tmpl))  # Priority 2
+            
+            # Sort by priority (lower number is higher priority)
+            template_matches.sort(key=lambda x: x[0])
+            
+            if template_matches:
+                best_match = template_matches[0][1]
+                print_success(f"Found best match for template '{template_name}': {best_match.name}")
+                return best_match.moid
+                
+        print_error(f"No matching template found for '{template_name}'")
+        return None
+            
+    except Exception as e:
+        print(f"Error getting template MOID: {str(e)}")
+        return None
+
+def get_server_moid(api_client, server_name):
+    """
+    Get the MOID of a server by name
+    """
+    from intersight.api import compute_api
+    
+    try:
+        # Create API instance
+        api_instance = compute_api.ComputeApi(api_client)
+        
+        # Define filter
+        filter_str = f"Name eq '{server_name}'"
+        
+        # Get servers
+        response = api_instance.get_compute_rack_unit_list(filter=filter_str)
+        
+        # Check if server exists
+        if response.results and len(response.results) > 0:
+            return response.results[0].moid
+        else:
+            print(f"Server {server_name} not found")
+            return None
+            
+    except Exception as e:
+        print(f"Error getting server MOID: {str(e)}")
+        return None
+
 def process_foundation_template(excel_file):
     """
     Read the Excel template and create pools and policies in Intersight
     """
     try:
         # Read Excel file
+        print_info("Reading Excel file...")
         df = pd.read_excel(excel_file, sheet_name=None)
         
         # Get API client
+        print_info("Connecting to Intersight API...")
         api_client = get_api_client()
         if not api_client:
-            print("Error: Failed to get API client")
+            print_error("Failed to get API client")
             return False
             
         # Process Pools sheet first
@@ -562,34 +1022,51 @@ def process_foundation_template(excel_file):
             # Rename columns to remove asterisks
             pools_df.columns = pools_df.columns.str.replace('*', '')
             
+            # Validate pools data before processing
+            print_info("Validating pools data...")
+            invalid_pools = validate_pools_data(pools_df)
+            if invalid_pools:
+                print_error(f"Found {len(invalid_pools)} invalid pool configurations:")
+                for pool_info in invalid_pools:
+                    print_error(f"  - {pool_info}")
+                print_error("Please correct these issues in the Excel file before proceeding.")
+                return False
+            
             # Track pool creation success
-            pools_created = True
+            successful_pools = []
             failed_pools = []
             
-            # Create or verify each pool
-            for _, row in pools_df.iterrows():
+            # Create or verify each pool with progress bar
+            print_info("\nProcessing pools...")
+            for _, row in progress_bar(pools_df.iterrows(), desc="Creating Pools", total=len(pools_df)):
                 pool_name = row['Pool Name']
                 pool_type = row['Pool Type']
                 
+                # Update progress bar description
+                sys.stdout.write(f"\rProcessing {pool_name}...")
+                sys.stdout.flush()
+                
                 # Check if pool exists
                 if pool_exists(api_client, pool_type, pool_name):
-                    print(f"\nPool {pool_name} already exists, skipping creation")
+                    print_info(f"Pool {pool_name} already exists, skipping creation")
+                    successful_pools.append(f"{pool_name} (already exists)")
                     continue
                     
                 # Try to create the pool
-                if not create_pool(api_client, row):
-                    pools_created = False
+                if create_pool(api_client, row):
+                    successful_pools.append(pool_name)
+                else:
                     failed_pools.append(pool_name)
             
+            # Print summary of pool creation
+            print_summary("Pool Creation", successful_pools, failed_pools)
+            
             # If any pools failed to create, stop here
-            if not pools_created:
-                print("\nError: Failed to create the following pools:")
-                for pool in failed_pools:
-                    print(f"  - {pool}")
-                print("\nAborting further processing until pool creation issues are resolved.")
+            if failed_pools:
+                print_error("\nAborting further processing until pool creation issues are resolved.")
                 return False
                 
-            print("\nAll pools created or verified successfully.")
+            print_success("\nAll pools created or verified successfully.")
                 
         # Only proceed with policies if pools were successful
         if 'Policies' in df:
@@ -597,48 +1074,165 @@ def process_foundation_template(excel_file):
             # Rename columns to remove asterisks
             policies_df.columns = policies_df.columns.str.replace('*', '')
             
+            # Validate policies data before processing
+            print_info("Validating policies data...")
+            invalid_policies = validate_policies_data(policies_df)
+            if invalid_policies:
+                print_error(f"Found {len(invalid_policies)} invalid policy configurations:")
+                for policy_info in invalid_policies:
+                    print_error(f"  - {policy_info}")
+                print_error("Please correct these issues in the Excel file before proceeding.")
+                return False
+            
             # Create policies in order: BIOS, QoS, vNIC, Boot, Storage
+            print_info("\nProcessing policies...")
             policy_order = ['BIOS', 'QoS', 'vNIC', 'Boot', 'Storage']
             
             # Track policy creation success
-            policies_created = True
+            successful_policies = []
             failed_policies = []
             
             for policy_type in policy_order:
-                print(f"\nProcessing {policy_type} policies...")
                 policy_rows = policies_df[policies_df['Policy Type'] == policy_type]
-                
-                for _, row in policy_rows.iterrows():
+                if len(policy_rows) == 0:
+                    continue
+                    
+                print_info(f"\nCreating {policy_type} policies...")
+                for _, row in progress_bar(policy_rows.iterrows(), desc=f"Creating {policy_type} Policies", total=len(policy_rows)):
                     policy_name = row['Policy Name']
+                    
+                    # Update progress bar description
+                    sys.stdout.write(f"\rProcessing {policy_name}...")
+                    sys.stdout.flush()
                     
                     # Check if policy exists
                     if policy_exists(api_client, get_policy_class_id(policy_type), policy_name):
-                        print(f"Policy {policy_name} already exists, skipping creation")
+                        print_info(f"Policy {policy_name} already exists, skipping creation")
+                        successful_policies.append(f"{policy_name} (already exists)")
                         continue
                         
                     # Try to create the policy
-                    if not create_policy(api_client, row):
-                        policies_created = False
+                    if create_policy(api_client, row):
+                        successful_policies.append(f"{policy_type}: {policy_name}")
+                    else:
                         failed_policies.append(f"{policy_type}: {policy_name}")
+                        print_error(f"Failed to create policy {policy_name}")
                         break  # Stop processing this policy type if one fails
                 
-                # If any policies failed, stop processing
-                if not policies_created:
-                    print("\nError: Failed to create the following policies:")
+                # If any policies failed in this batch, stop processing
+                if failed_policies:
+                    print_error(f"\nError: Failed to create the following policies:")
                     for policy in failed_policies:
-                        print(f"  - {policy}")
-                    print("\nAborting further processing until policy creation issues are resolved.")
+                        print_error(f"  - {policy}")
+                    print_error(f"\nAborting further processing until policy creation issues are resolved.")
                     return False
                     
-                print(f"All {policy_type} policies created or verified successfully.")
+                print_success(f"All {policy_type} policies created or verified successfully.")
                 
                 # Add a small delay between policy types
                 if policy_type != policy_order[-1]:
-                    print(f"Waiting for {policy_type} policies to be fully created...")
+                    print_info(f"Waiting for {policy_type} policies to be fully created...")
                     time.sleep(5)
             
             print("\nAll policies created or verified successfully.")
+
+        # Process Templates sheet
+        if 'Template' in df:
+            templates_df = df['Template']
+            # Rename columns to remove asterisks
+            templates_df.columns = templates_df.columns.str.replace('*', '')
             
+            print("\nProcessing server templates...")
+            
+            # Track template creation success
+            templates_created = True
+            failed_templates = []
+            
+            for _, row in templates_df.iterrows():
+                template_name = row['Template Name']
+                print(f"\nCreating server template: {template_name}")
+                
+                # Create the template
+                if not create_server_template(api_client, row):
+                    templates_created = False
+                    failed_templates.append(template_name)
+            
+            # If any templates failed, notify but continue processing
+            if not templates_created:
+                print("\nWarning: Failed to create the following templates:")
+                for template in failed_templates:
+                    print(f"  - {template}")
+            else:
+                print("\nAll server templates created or verified successfully.")
+            
+            # Add a small delay after template creation
+            print("Waiting for templates to be fully created...")
+            time.sleep(5)
+        
+        # Process Profiles sheet
+        if 'Profiles' in df:
+            profiles_df = df['Profiles']
+            # Rename columns to remove asterisks
+            profiles_df.columns = profiles_df.columns.str.replace('*', '')
+            
+            print("\nProcessing server profiles...")
+            
+            # Track profile creation success
+            profiles_created = True
+            failed_profiles = []
+            
+            for _, row in profiles_df.iterrows():
+                profile_name = row['Profile Name']
+                print(f"\nCreating server profile: {profile_name}")
+                
+                # Check if profile should be deployed
+                deploy = row.get('Deploy', 'No')
+                if deploy.lower() == 'yes':
+                    print(f"Profile {profile_name} will be deployed after creation")
+                
+                # Create the profile using the new approach that derives from template
+                if not create_and_derive_profile(api_client, row):
+                    profiles_created = False
+                    failed_profiles.append(profile_name)
+            
+            # If any profiles failed, notify
+            if not profiles_created:
+                print("\nWarning: Failed to create the following profiles:")
+                for profile in failed_profiles:
+                    print(f"  - {profile}")
+            else:
+                print("\nAll server profiles created or verified successfully.")
+            
+        # Display a summary of profiles that need manual creation
+        if 'profiles_for_manual_creation' in globals() and profiles_for_manual_creation:
+            print("\n" + "="*80)
+            print("\n⚠️  PROFILES REQUIRING MANUAL CREATION IN INTERSIGHT  ⚠️")
+            print("\nThe following profiles must be created manually in the Intersight UI")
+            print("due to API limitations when creating profiles from templates:")
+            print("\n" + "-"*50)
+            print(f"{'Profile Name':<20} {'Template':<30} {'Server':<25} {'Deploy':<5}")
+            print("-"*80)
+            
+            for profile in profiles_for_manual_creation:
+                name = profile.get('name', 'N/A')
+                template = profile.get('template', 'N/A')
+                server = profile.get('server', 'N/A')
+                deploy = profile.get('deploy', 'No')
+                print(f"{name:<20} {template:<30} {server:<25} {deploy:<5}")
+                
+            print("\n" + "-"*50)
+            print("Instructions:")
+            print("1. Log into Intersight UI")
+            print("2. Navigate to Profiles > UCS Server Profiles")
+            print("3. Click 'Create Server Profile'")
+            print("4. Select 'From Template'")
+            print("5. For each profile above:")
+            print("   - Select the listed template")
+            print("   - Enter the profile name")
+            print("   - Assign the server (if listed)")
+            print("   - Deploy if 'Deploy' is set to 'Yes'")
+            print("\n" + "="*80)
+        
         print("\nCompleted processing the Foundation template")
         return True
         
@@ -740,7 +1334,7 @@ def add_template_sheet(excel_file, api_client):
         # Example template data
         template_example = [
             "Ai_POD_Template",
-            "Gruve",
+            "default",
             "Server template for AI POD workloads",
             "FIAttached",
             "Ai_POD-BIOS",
@@ -1213,14 +1807,20 @@ def create_server_profiles_from_excel(api_client, excel_file):
                 if server_moid:
                     profile_body["AssignedServer"] = {"ObjectType": "compute.RackUnit", "Moid": server_moid}
                 
-                try:
-                    print(f"\nCreating profile: {profile_name}")
-                    print(f"Profile body: {profile_body}")
-                    profile = server_api_instance.create_server_profile(profile_body)
-                    print(f"Successfully created profile: {profile_name}")
+                # Create a profile data dictionary for our custom function
+                # that can handle the manual creation list
+                profile_data = {
+                    'Name': profile_name,
+                    'Organization': org_name,
+                    'Template': template_name,
+                    'Server': server_info,
+                    'Deploy': deploy,
+                    'Description': description
+                }
+                
+                success = create_server_profile(api_client, profile_data)
+                if success:
                     profiles_created += 1
-                except Exception as e:
-                    print(f"Error creating profile {profile_name}: {str(e)}")
                     continue
         
         print(f"\nCreated {profiles_created} server profiles")
@@ -1329,6 +1929,11 @@ def reorder_sheets(workbook):
 def setup_excel_file(api_client, excel_file):
     """Set up a new Excel file with the correct structure"""
     try:
+        # Always use AI_POD_master_Template.xlsx as the filename
+        if excel_file and not excel_file.endswith("AI_POD_master_Template.xlsx"):
+            excel_file = "output/AI_POD_master_Template.xlsx"
+            print_info(f"Setting filename to {excel_file}")
+            
         workbook = Workbook()
         
         # Create sheets in the correct order
@@ -1353,6 +1958,8 @@ def setup_excel_file(api_client, excel_file):
             ("MAC Pool", "Ai_POD-MAC-B", "MAC Pool for AI POD Fabric B", "00:25:B5:B0:00:00", "256"),
             ("UUID Pool", "Ai_POD-UUID-Pool", "UUID Pool for AI POD Servers", "0000-000000000001", "100")
         ]
+        
+        # Add all sample pool data to the sheet
         for idx, example in enumerate(sample_pools, 2):
             for col, value in enumerate(example, 1):
                 pools_sheet.cell(row=idx, column=col, value=value)
@@ -1374,6 +1981,8 @@ def setup_excel_file(api_client, excel_file):
             ('QoS', 'Ai_POD-QoS', 'QoS Policy for AI POD', 'default'),
             ('Storage', 'Ai_POD-Storage', 'Storage Policy for AI POD', 'default')
         ]
+        
+        # Add all sample policy data to the sheet
         for row_idx, row in enumerate(sample_policies, 2):
             for col_idx, value in enumerate(row, 1):
                 policies_sheet.cell(row=row_idx, column=col_idx, value=value)
@@ -1390,17 +1999,19 @@ def setup_excel_file(api_client, excel_file):
             "LAN Connectivity Policy*",
             "Storage Policy*"
         ]
+        
+        # Add headers with styling
         for col, header in enumerate(template_headers, 1):
             cell = template_sheet.cell(row=1, column=col, value=header)
             cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
             cell.font = Font(color='FFFFFF', bold=True)
             if '*' in header:
-                template_sheet.cell(row=1, column=col).font = Font(color='FF0000', bold=True)
+                cell.font = Font(color='FF0000', bold=True)
         
         # Add sample template data
         template_example = [
             "Ai_POD_Template",
-            "Gruve",
+            "default",
             "Server template for AI POD workloads",
             "FIAttached",
             "Ai_POD-BIOS",
@@ -1408,6 +2019,8 @@ def setup_excel_file(api_client, excel_file):
             "Ai_POD-vNIC-A",
             "Ai_POD-Storage"
         ]
+        
+        # Add all sample template data to the sheet
         for col, value in enumerate(template_example, 1):
             template_sheet.cell(row=2, column=col, value=value)
         
@@ -1431,7 +2044,7 @@ def setup_excel_file(api_client, excel_file):
         # Create server options list
         server_options = []
         for server in servers.results:
-            server_info = f"{server.name} ({server.model}) | SN: {server.serial} | State: {server.oper_state}"
+            server_info = f"{server.name} | SN: {server.serial}"
             server_options.append(server_info)
         
         # Add server dropdown validation
@@ -1951,7 +2564,7 @@ def get_intersight_info(api_client, excel_file):
             pool_validation.add('A2:A1000')  # Apply to Pool Types column
             pools_sheet.add_data_validation(pool_validation)
             print("Added dropdown for Pool Types in Pools sheet")
-        
+
         # Policies sheet dropdown
         if 'Policies' in workbook.sheetnames:
             policies_sheet = workbook['Policies']
@@ -2467,6 +3080,351 @@ def update_profiles_with_server_info(api_client, excel_file):
         traceback.print_exc()
         return False
 
+# Define retry decorator directly in script to avoid import issues
+def retry_api_call(max_retries=3, delay=2):
+    """Decorator to retry API calls with exponential backoff"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            current_delay = delay
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    retries += 1
+                    if retries >= max_retries:
+                        print(f"API call failed after {max_retries} attempts: {str(e)}")
+                        raise
+                    
+                    print(f"API call failed. Retrying in {current_delay}s... ({retries}/{max_retries})")
+                    time.sleep(current_delay)
+                    current_delay *= 1.5  # Exponential backoff
+        return wrapper
+    return decorator
+
+# Fallback print functions if utils module import failed
+def print_info(message):
+    print(message)
+    
+def print_success(message):
+    print(message)
+    
+def print_warning(message):
+    print(message)
+    
+def print_error(message):
+    print(message)
+
+def progress_bar(iterable, desc="", total=None):
+    return iterable
+
+def print_summary(title, success_items, failed_items):
+    print(f"\n{title} Summary")
+    if success_items:
+        print(f"Successfully processed {len(success_items)} items")
+    if failed_items:
+        print(f"Failed to process {len(failed_items)} items")
+        
+def validate_pools_data(pools_df):
+    """Validate pools data before creating in Intersight"""
+    invalid_pools = []
+    
+    for idx, row in pools_df.iterrows():
+        pool_type = row.get('Pool Type')
+        pool_name = row.get('Pool Name')
+        
+        # Check for missing required fields
+        if not pool_type or pd.isna(pool_type):
+            invalid_pools.append(f"Row {idx+2}: Missing Pool Type")
+            continue
+        
+        if not pool_name or pd.isna(pool_name):
+            invalid_pools.append(f"Row {idx+2}: Missing Pool Name")
+            continue
+            
+        # Validate pool type specific fields
+        if pool_type == 'MAC Pool':
+            start_addr = row.get('Start Address')
+            size = row.get('Size')
+            
+            if not start_addr or pd.isna(start_addr):
+                invalid_pools.append(f"Row {idx+2}: Missing Start Address for MAC Pool '{pool_name}'")
+            elif not isinstance(start_addr, str):
+                invalid_pools.append(f"Row {idx+2}: Invalid Start Address format for MAC Pool '{pool_name}'")
+            
+            if not size or pd.isna(size):
+                invalid_pools.append(f"Row {idx+2}: Missing Size for MAC Pool '{pool_name}'")
+            elif not str(size).isdigit():
+                invalid_pools.append(f"Row {idx+2}: Size must be a number for MAC Pool '{pool_name}'")
+    
+    return invalid_pools
+
+def validate_policies_data(policies_df):
+    """Validate policies data before creating in Intersight"""
+    invalid_policies = []
+    
+    for idx, row in policies_df.iterrows():
+        policy_type = row.get('Policy Type')
+        policy_name = row.get('Policy Name')
+        
+        # Check for missing required fields
+        if not policy_type or pd.isna(policy_type):
+            invalid_policies.append(f"Row {idx+2}: Missing Policy Type")
+            continue
+        
+        if not policy_name or pd.isna(policy_name):
+            invalid_policies.append(f"Row {idx+2}: Missing Policy Name")
+            continue
+    
+    return invalid_policies
+
+@retry_api_call(max_retries=3, delay=2)
+def create_and_derive_profile(api_client, profile_data):
+    """Create a server profile and then attach it to a template using the official API approach"""
+    from intersight.api import server_api
+    from intersight.model.server_profile import ServerProfile
+    from intersight.model.mo_mo_ref import MoMoRef
+    
+    # Map DataFrame column names to expected parameter names
+    profile_name = profile_data.get('Profile Name')
+    template_name = profile_data.get('Template Name')
+    server_name = profile_data.get('Server')
+    org_name = profile_data.get('Organization')
+    deploy = profile_data.get('Deploy', 'No')
+    description = f"Server Profile for {server_name}"
+    
+    print_info(f"\nCreating server profile: {profile_name}")
+    if deploy.lower() == "yes":
+        print_info(f"Profile {profile_name} will be deployed after creation")
+    
+    print_info(f"Organization: {org_name}")
+    print_info(f"Template: {template_name}")
+    print_info(f"Server: {server_name}")
+    
+    try:
+        # Create API instance
+        api_instance = server_api.ServerApi(api_client)
+        
+        # Get organization MOID
+        print_info(f"Looking up organization: {org_name}")
+        org_moid = get_org_moid(api_client, org_name)
+        if not org_moid:
+            print_error(f"Organization {org_name} not found")
+            return False
+            
+        # Create organization reference
+        organization = MoMoRef(
+            class_id="mo.MoRef",
+            object_type="organization.Organization",
+            moid=org_moid
+        )
+        print_success(f"Found organization with MOID: {org_moid}")
+        
+        # Get template MOID - check if we have a template mapping for this name
+        if template_mappings and template_name in template_mappings:
+            mapped_template_name = template_mappings[template_name]
+            print(f"Found template mapping for {template_name} -> {mapped_template_name}")
+            template_name = mapped_template_name
+        
+        template_moid = get_template_moid(api_client, template_name)
+        if not template_moid:
+            print(f"Template {template_name} not found")
+            return False
+        
+        # Create template reference
+        template_ref = MoMoRef(
+            class_id="mo.MoRef",
+            object_type="server.ProfileTemplate",
+            moid=template_moid
+        )
+        
+        # Get server MOID if specified
+        server_ref = None
+        if server_name:
+            # Extract serial number if format is "Name | SN: XYZ"
+            serial_number = None
+            if " | SN: " in server_name:
+                parts = server_name.split(" | SN: ")
+                server_name = parts[0].strip()
+                serial_number = parts[1].strip()
+            
+            server_moid = get_server_moid(api_client, server_name)
+            if not server_moid:
+                print(f"Server {server_name} not found")
+                return False
+                
+            # Create server reference
+            server_ref = MoMoRef(
+                class_id="mo.MoRef",
+                object_type="compute.RackUnit",
+                moid=server_moid
+            )
+        
+        # STEP 1: Create ServerProfile instance following the official docs
+        print("Creating server profile using official API approach...")
+        server_profile = ServerProfile()
+        server_profile.name = profile_name
+        server_profile.description = description
+        server_profile.organization = organization
+        server_profile.target_platform = "Standalone"  # Assuming standalone for now
+        server_profile.type = "instance"  # 'instance' for profiles
+        
+        # Add server reference if we have one
+        if server_ref:
+            server_profile.assigned_server = server_ref
+        
+        # Create the profile
+        print(f"Creating profile: {profile_name}")
+        resp_server_profile = api_instance.create_server_profile(server_profile)
+        profile_moid = resp_server_profile.moid
+        print(f"Successfully created profile with MOID: {profile_moid}")
+        
+        # STEP 2: Update profile to attach it to the template
+        print(f"Attaching profile to template {template_name}...")
+        
+        # Create update body with template reference
+        update_profile = ServerProfile()
+        update_profile.src_template = template_ref
+        
+        # Update the profile to attach to template
+        api_instance.update_server_profile(profile_moid, update_profile)
+        
+        print(f"Successfully created and attached profile {profile_name} to template")
+        return True
+        
+    except Exception as e:
+        print(f"Error using official API approach: {str(e)}")
+        print("\n⚠️ Unable to create server profile with template attachment.")
+        print("This profile will need to be created manually in the Intersight UI.")
+        
+        # Store profile for manual creation report
+        if 'profiles_for_manual_creation' not in globals():
+            global profiles_for_manual_creation
+            profiles_for_manual_creation = []
+        
+        # Store info needed for manual creation
+        profile_info = {
+            'name': profile_name,
+            'template': template_name,
+            'organization': org_name,
+            'server': server_name,
+            'deploy': deploy
+        }
+        profiles_for_manual_creation.append(profile_info)
+        
+        return False
+
+def create_basic_server_profile(api_client, profile_name, org_moid, server_moid=None):
+    """Create a basic server profile"""
+    from intersight.api import server_api
+    from intersight.model.server_profile import ServerProfile
+    from intersight.model.mo_mo_ref import MoMoRef
+    
+    try:
+        # Create organization reference
+        org_ref = MoMoRef(
+            class_id="mo.MoRef",
+            object_type="organization.Organization",
+            moid=org_moid
+        )
+        
+        # Create server reference if server_moid exists
+        server_ref = None
+        if server_moid:
+            server_ref = MoMoRef(
+                class_id="mo.MoRef",
+                object_type="compute.RackUnit",
+                moid=server_moid
+            )
+        
+        # Create API instance
+        api_instance = server_api.ServerApi(api_client)
+        
+        # Create the profile with exactly matching property names from API docs
+        profile_min = {
+            "Name": profile_name,
+            "Organization": {
+                "ClassId": "mo.MoRef",
+                "ObjectType": "organization.Organization",
+                "Moid": org_moid
+            },
+            "Type": "instance",  # API doc shows this is needed, values are 'instance' or 'template'
+            "ClassId": "server.Profile",
+            "ObjectType": "server.Profile"
+        }
+        
+        # Add server if specified
+        if server_moid:
+            profile_min["AssignedServer"] = {
+                "ClassId": "mo.MoRef",
+                "ObjectType": "compute.RackUnit",
+                "Moid": server_moid
+            }
+        
+        # Configure HTTP request args
+        local_var_params = {'server_profile': profile_min}
+        collection_formats = {}
+        path_params = {}
+        query_params = []
+        header_params = {}
+        form_params = []
+        local_var_files = {}
+        body_params = None
+        
+        # HTTP header `Accept`
+        header_params['Accept'] = api_client.select_header_accept(['application/json'])
+        # HTTP header `Content-Type`
+        header_params['Content-Type'] = api_client.select_header_content_type(['application/json'])
+        
+        # Authentication setting
+        auth_settings = ['cookieAuth', 'oAuth2']
+        body_params = local_var_params['server_profile']
+        
+        # Make direct call to API client
+        api_client.call_api(
+            '/server/Profiles', 'POST',
+            path_params,
+            query_params,
+            header_params,
+            body=body_params,
+            post_params=form_params,
+            files=local_var_files,
+            response_type='ServerProfile',
+            auth_settings=auth_settings,
+            async_req=False,
+            _return_http_data_only=True,
+            _preload_content=True,
+            collection_formats=collection_formats)
+        
+        print(f"Successfully created Server Profile: {profile_name}")
+        return profile_name
+    
+    except Exception as e:
+        print(f"Error creating Server Profile: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def derive_profile_from_template(api_client, profile_moid, template_moid):
+    """Derive a server profile from a template"""
+    from intersight.api import server_api
+    
+    try:
+        # Create API instance
+        api_instance = server_api.ServerApi(api_client)
+        
+        # Derive the profile from the template
+        api_instance.derive_server_profile(server_profile_moid=profile_moid, server_profile_template_moid=template_moid)
+        print(f"Successfully derived Server Profile from Template")
+        return True
+    
+    except Exception as e:
+        print(f"Error deriving Server Profile from Template: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Create and push Intersight Foundation configuration')
     parser.add_argument('--action', choices=['push', 'template', 'profiles', 'all', 'setup', 'create-template', 'get-info', 'update-servers'], required=True,
@@ -2485,7 +3443,10 @@ if __name__ == "__main__":
         api_client = get_api_client()
         if not api_client:
             sys.exit(1)
-        setup_excel_file(api_client, args.file)
+        # Always use AI_POD_master_Template.xlsx as the filename for setup action
+        excel_file = "output/AI_POD_master_Template.xlsx"
+        print_info(f"Using standard filename: {excel_file}")
+        setup_excel_file(api_client, excel_file)
     elif args.action == 'get-info':
         api_client = get_api_client()
         if not api_client:
