@@ -2091,10 +2091,12 @@ def setup_excel_file(api_client, excel_file):
         profile_headers = ["Profile Name*", "Description", "Organization*", "Template Name*", "Server*", "Description", "Deploy*"]
         for col, header in enumerate(profile_headers, 1):
             cell = profiles_sheet.cell(row=1, column=col, value=header)
-            cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
-            cell.font = Font(color='FFFFFF', bold=True)
+            cell.fill = header_fill
+            # Use red font for required headers (marked with *)
             if '*' in header:
-                cell.font = Font(color='FF0000', bold=True)
+                cell.font = required_font
+            else:
+                cell.font = header_font
         
         # Add 8 profile templates with Deploy set to No
         for i in range(1, 9):
@@ -2362,7 +2364,11 @@ def create_template_excel(excel_file):
     for col, header in enumerate(profile_headers, 1):
         cell = profiles_sheet.cell(row=1, column=col, value=header)
         cell.fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
-        cell.font = Font(color='FFFFFF', bold=True)
+        # Use red font for required headers (marked with *)
+        if '*' in header:
+            cell.font = Font(color='FF0000', bold=True)
+        else:
+            cell.font = Font(color='FFFFFF', bold=True)
     
     # Add 8 sample profile templates with Deploy set to No
     for i in range(1, 9):
@@ -2583,6 +2589,22 @@ def get_intersight_info(api_client, excel_file):
         if 'Profiles' in workbook.sheetnames:
             profiles_sheet = workbook['Profiles']
             
+            # Ensure header row formatting is correct
+            header_fill = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
+            header_font = Font(color='FFFFFF', bold=True)
+            required_font = Font(color='FF0000', bold=True)
+            
+            # Re-apply formatting to headers
+            for col in range(1, profiles_sheet.max_column + 1):
+                header = profiles_sheet.cell(row=1, column=col).value
+                if header:
+                    cell = profiles_sheet.cell(row=1, column=col)
+                    cell.fill = header_fill
+                    if '*' in header:
+                        cell.font = required_font
+                    else:
+                        cell.font = header_font
+            
             # Clear all validations
             profiles_sheet.data_validations.dataValidation = []
             
@@ -2635,11 +2657,19 @@ def get_intersight_info(api_client, excel_file):
                 profiles_sheet.add_data_validation(deploy_validation)
             
             # Always create fresh organization dropdown with latest data
+            print(f"Creating organization dropdown with values: {org_names}")
+            org_formula = f'"{",".join(org_names)}"'
+            print(f"Organization formula: {org_formula}")
             org_validation = DataValidation(
                 type='list',
-                formula1=f'"{",".join(org_names)}"',
+                formula1=org_formula,
                 allow_blank=True
             )
+            # Clear existing organization validations
+            profiles_sheet.data_validations.dataValidation = [
+                dv for dv in profiles_sheet.data_validations.dataValidation 
+                if not any(str(cell).startswith('C') for cell in dv.sqref)
+            ]
             org_validation.add('C2:C1000')  # Apply to Organization column range
             profiles_sheet.add_data_validation(org_validation)
             
@@ -2664,11 +2694,18 @@ def get_intersight_info(api_client, excel_file):
             policies_sheet = workbook['Policies']
             
             # Always create fresh organization dropdown with latest data
+            print(f"Creating organization dropdown for Policies sheet with values: {org_names}")
+            org_formula = f'"{",".join(org_names)}"'
             org_validation = DataValidation(
                 type='list',
-                formula1=f'"{",".join(org_names)}"',
+                formula1=org_formula,
                 allow_blank=True
             )
+            # Clear existing organization validations
+            policies_sheet.data_validations.dataValidation = [
+                dv for dv in policies_sheet.data_validations.dataValidation 
+                if not any(str(cell).startswith('D') for cell in dv.sqref)
+            ]
             org_validation.add('D2:D1000')  # Apply to Organizations columns
             policies_sheet.add_data_validation(org_validation)
             
@@ -2688,24 +2725,24 @@ def get_intersight_info(api_client, excel_file):
             template_sheet = workbook['Template']
             
             # Always create fresh organization dropdown with latest data
+            print(f"Creating organization dropdown for Template sheet with values: {org_names}")
+            org_formula = f'"{",".join(org_names)}"'
             org_validation = DataValidation(
                 type='list',
-                formula1=f'"{",".join(org_names)}"',
+                formula1=org_formula,
                 allow_blank=True
             )
+            # Clear existing organization validations
+            template_sheet.data_validations.dataValidation = [
+                dv for dv in template_sheet.data_validations.dataValidation 
+                if not any(str(cell).startswith('B') for cell in dv.sqref)
+            ]
             org_validation.add('B2:B1000')  # Apply to Organizations column
             template_sheet.add_data_validation(org_validation)
             
             
-            # Add organization dropdown if not found
-            if not org_dv_found:
-                org_validation = DataValidation(
-                    type='list',
-                    formula1=f'"{",".join(org_names)}"',
-                    allow_blank=True
-                )
-                org_validation.add('B2:B1000')  # Apply to Organizations column
-                template_sheet.add_data_validation(org_validation)
+            # Remove redundant code - already handled above
+            # This block is redundant and may cause duplicate validations
             
             # Reapply target platform dropdown to column D in Template sheet
             platform_validation = DataValidation(
