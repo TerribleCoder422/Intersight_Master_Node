@@ -14,17 +14,19 @@ This project provides tools to interact with Cisco Intersight, offering a full-c
 ## Features
 
 - **Authentication**: Secure authentication with Intersight using API keys
-- **Standardized Templates**: Automatically generate Excel templates with consistent naming (AI_POD_master_Template.xlsx)
-- **Default Organization**: Templates are pre-configured with "default" organization for consistency
+- **Standardized Templates**: Automatically generate Excel templates with consistent naming
+- **Idempotent Operations**: Pools, policies and templates are created only if they don't already exist
 - **Pool Management**: Create and manage MAC, UUID, and other pools
 - **Policy Management**: Create and manage BIOS, Boot, vNIC, Storage and other policies
 - **Template Management**: Create and manage UCS Server Profile templates
-- **Profile Management**: Create, deploy and manage UCS Server Profiles
+- **Profile Management**: Create profiles from templates and assign servers WITHOUT automatic deployment
+- **Server Assignment**: Automatically assign servers to profiles with clear verification messages
 - **Progress Tracking**: Visual progress indicators and color-coded outputs
 - **Smart Template Matching**: Flexible name matching to find templates in Intersight
 - **Dynamic Dropdowns**: Automatically populate Excel dropdowns with data from your Intersight instance
 - **Data Validation**: Validate required fields before pushing to Intersight
 - **Error Handling**: Comprehensive error handling with clear messages
+- **Multi-Organization Support**: Work with resources across different organizations
 
 ## Setup
 
@@ -128,10 +130,10 @@ The recommended workflow consists of the following steps:
 Generate and set up the standardized Excel template for Intersight configurations:
 
 ```bash
-python3 create_intersight_foundation.py --action setup --file dummy.xlsx
+python create_standard_excel.py --output output/my_template.xlsx
 ```
 
-Note: This will always create `output/AI_POD_master_Template.xlsx` regardless of the filename provided.
+Note: This will always create `output/my_template.xlsx` regardless of the filename provided.
 
 The standardized template includes:
 
@@ -152,12 +154,10 @@ The standardized template includes:
 
 ### Update Excel with Intersight Data
 
-### Update Excel with Intersight Data
-
 Fetch data from Intersight and update the Excel template with dynamic dropdowns:
 
 ```bash
-python3 create_intersight_foundation.py --action get-info --file output/AI_POD_master_Template.xlsx
+python update_intersight_data.py --file output/my_template.xlsx
 ```
 
 ### Push Configuration to Intersight
@@ -165,7 +165,7 @@ python3 create_intersight_foundation.py --action get-info --file output/AI_POD_m
 Create pools, policies, templates and profiles in Intersight based on the Excel template:
 
 ```bash
-python3 create_intersight_foundation.py --action push --file output/AI_POD_master_Template.xlsx
+python push_intersight_template.py --action push --file output/my_template.xlsx
 ```
 
 ### Update Server Information
@@ -173,7 +173,7 @@ python3 create_intersight_foundation.py --action push --file output/AI_POD_maste
 Refresh the list of available servers in your Excel template:
 
 ```bash
-python3 create_intersight_foundation.py --action update-servers --file output/AI_POD_master_Template.xlsx
+python update_intersight_data.py --file output/my_template.xlsx
 ```
 
 ## Working with the Excel Template
