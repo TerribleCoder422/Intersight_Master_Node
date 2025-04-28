@@ -8,8 +8,7 @@ secret.key
 # Ignore logs
 logs/
 
-# Ignore output
-output/
+# Ignore output/Intersight_Template.xlsx
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
