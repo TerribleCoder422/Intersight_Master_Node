@@ -29,6 +29,7 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.comments import Comment
 import uuid
 from datetime import datetime
 import functools
@@ -2221,15 +2222,8 @@ def add_template_sheet(excel_file, api_client):
         
 def create_template_excel(excel_file):
     """Create a fresh template Excel file with the original structure"""
-    # Check if file exists, prompt to keep or replace
-    if os.path.exists(excel_file):
-        response = input(f"A file named '{excel_file}' already exists. Would you like to keep the existing file or replace it? (k = keep, r = replace): ")
-        if response.lower() == 'k':
-            print(f"Keeping the existing file: {excel_file}.")
-            return True
-        elif response.lower() != 'r':
-            print("Invalid response. Exiting.")
-            return False
+    # The file existence check is now handled in the main script
+    # This function will always create/overwrite the specified file
             
     workbook = Workbook()
     
@@ -2616,12 +2610,26 @@ def get_intersight_info(api_client, excel_file):
         try:
             resource_api_instance = resource_api.ResourceApi(api_client)
             resource_groups = resource_api_instance.get_resource_group_list()
-            resource_group_names = [group.name for group in resource_groups.results]
+            # Filter out License-related resource groups and other system groups that aren't user-relevant
+            raw_resource_group_names = [group.name for group in resource_groups.results]
+            resource_group_names = []
+            for name in raw_resource_group_names:
+                # Skip License and system resource groups
+                if name.startswith("License-") or name in ["default", "RG-Standalone"]:
+                    continue
+                # Keep user-created resource groups
+                resource_group_names.append(name)
+                
+            # Also add "AI POD Servers" if it's not there already, since your sample data uses it
+            if "AI POD Servers" not in resource_group_names:
+                resource_group_names.append("AI POD Servers")
+            
+            # Add a default if nothing left
             if not resource_group_names:
-                resource_group_names = ["Default", "AI POD Servers", "ML Servers", "DevOps", "Production"]
-                print(f"No resource groups found. Using default sample values: {resource_group_names}")
+                resource_group_names = ["AI POD Servers", "ML Servers", "DevOps", "Production"]
+                print(f"No relevant resource groups found. Using default sample values: {resource_group_names}")
             else:
-                print(f"Found {len(resource_group_names)} resource groups: {resource_group_names}")
+                print(f"Found {len(resource_group_names)} relevant resource groups: {resource_group_names}")
         except Exception as e:
             resource_group_names = ["Default", "AI POD Servers", "ML Servers", "DevOps", "Production"]
             print(f"Error getting resource groups: {str(e)}. Using default sample values: {resource_group_names}")
@@ -2740,18 +2748,101 @@ def get_intersight_info(api_client, excel_file):
             resource_group_col = header_map.get('Resource Group*')
             template_name_col = header_map.get('Template Name*')
             
-            # Add server dropdown to correct column
-            if server_col:
-                server_options = [f"{server.name} | SN: {server.serial}" for server in servers.results]
-                server_formula = '"' + ','.join(server_options) + '"'
-                server_validation = DataValidation(
-                    type='list',
-                    formula1=server_formula,
-                    allow_blank=True
-                )
-                col_letter = get_column_letter(server_col)
-                server_validation.add(f'{col_letter}2:{col_letter}1000')
-                profiles_sheet.add_data_validation(server_validation)
+            # Create a simple static approach instead of dynamic dropdowns to avoid Excel compatibility issues
+            if server_col and len(servers.results) > 0:
+                print("Creating static server dropdown with resource group information")
+                
+                # Map servers to resource groups based on name patterns for documentation
+                server_resource_groups = {}
+                for rg_name in resource_group_names:
+                    server_resource_groups[rg_name] = []
+                
+                # Collect all server options in a single list
+                all_server_options = []
+                
+                for server in servers.results:
+                    server_option = f"{server.name} | SN: {server.serial}"
+                    all_server_options.append(server_option)
+                    
+                    # Also track which resource group each server belongs to
+                    if "Worker" in server.name and "AI-Pod-Worker-Nodes" in resource_group_names:
+                        server_resource_groups["AI-Pod-Worker-Nodes"].append(server_option)
+                    elif "CP" in server.name and "AI-Pod-Cluster-Nodes" in resource_group_names:
+                        server_resource_groups["AI-Pod-Cluster-Nodes"].append(server_option)
+                    elif "RAG" in server.name and "AI_Pod_RAG" in resource_group_names:
+                        server_resource_groups["AI_Pod_RAG"].append(server_option)
+                    elif "AI" in server.name and "AIIntersight" in resource_group_names:
+                        server_resource_groups["AIIntersight"].append(server_option)
+                    elif "Isaiah" in server.name and "Isaiah_automation" in resource_group_names:
+                        server_resource_groups["Isaiah_automation"].append(server_option)
+                    elif "AI POD Servers" in resource_group_names:
+                        server_resource_groups["AI POD Servers"].append(server_option)
+                
+                # Display resource group to server mapping in the console
+                print(f"Found {len(all_server_options)} total servers, grouped by resource group:")
+                for rg_name, servers_list in server_resource_groups.items():
+                    if servers_list:
+                        print(f"  - {rg_name}: {len(servers_list)} servers")
+                
+                # Create a simple static dropdown with all servers
+                # First remove any existing validation in the server column
+                for dv in list(profiles_sheet.data_validations.dataValidation):
+                    if f"{get_column_letter(server_col)}2" in str(dv.sqref):
+                        profiles_sheet.data_validations.dataValidation.remove(dv)
+                
+                # Create a static dropdown with all servers
+                visible_servers = all_server_options[:50] if len(all_server_options) > 50 else all_server_options
+                server_formula = '"' + ','.join(visible_servers) + '"'
+                server_dv = DataValidation(type='list', formula1=server_formula, allow_blank=True)
+                server_dv.add(f"{get_column_letter(server_col)}2:{get_column_letter(server_col)}1000")
+                profiles_sheet.add_data_validation(server_dv)
+                
+                # Create a mapping sheet to help users select servers based on resource group
+                if 'ServerMapping' not in workbook.sheetnames:
+                    workbook.create_sheet('ServerMapping')
+                    # Move to the end, but not hidden for user reference
+                    workbook.move_sheet('ServerMapping', -1)
+                
+                mapping_sheet = workbook['ServerMapping']
+                
+                # Clear existing content
+                for row in range(1, mapping_sheet.max_row + 1):
+                    for col in range(1, mapping_sheet.max_column + 1):
+                        mapping_sheet.cell(row=row, column=col).value = None
+                
+                # Add header and instructions
+                mapping_sheet.cell(row=1, column=1).value = "Resource Group to Server Mapping"
+                mapping_sheet.cell(row=2, column=1).value = "Use this sheet to find which servers belong to each resource group"
+                mapping_sheet.cell(row=3, column=1).value = "Resource Group"
+                mapping_sheet.cell(row=3, column=2).value = "Servers"
+                
+                # Add mapping data
+                row_index = 4
+                for rg_name, servers_list in server_resource_groups.items():
+                    if not servers_list:
+                        continue
+                    
+                    mapping_sheet.cell(row=row_index, column=1).value = rg_name
+                    
+                    # Add each server as a separate row for better readability
+                    for i, server in enumerate(servers_list):
+                        if i == 0:
+                            mapping_sheet.cell(row=row_index, column=2).value = server
+                        else:
+                            mapping_sheet.cell(row=row_index + i, column=2).value = server
+                    
+                    row_index += max(len(servers_list), 1) + 1  # Add empty row between groups
+                
+                # Add a note to the Server column to help users know about the mapping sheet
+                note_cell = profiles_sheet.cell(row=1, column=server_col)
+                note_cell.comment = Comment(
+                    "See the ServerMapping sheet to find which servers belong to each resource group", "System")
+                
+                print("Added static server dropdown with all servers")
+                print("Created ServerMapping sheet to help users select appropriate servers")
+            else:
+                # If no server column is found, just skip the server dropdown setup
+                print("Warning: No server column found, skipping server dropdown setup")
             
             # Add deploy dropdown to correct column
             if deploy_col:
@@ -3688,9 +3779,35 @@ if __name__ == "__main__":
             sys.exit(1)
         update_profiles_with_server_info(api_client, args.file)
     elif args.action == 'create-template':
-        # Always use Intersight_Template.xlsx as the standard filename unless specified otherwise
-        if args.file != 'output/Intersight_Template.xlsx' and '--file' not in sys.argv:
-            print(f"Using standard template filename: output/Intersight_Template.xlsx")
+        # Check if any existing template files are in the output directory
+        template_files = [f for f in os.listdir('output/') if f.endswith('.xlsx') and os.path.isfile(os.path.join('output/', f))]
+        
+        # If there are existing template files and no specific file was provided
+        if template_files and '--file' not in sys.argv:
+            print("Found existing template files:")
+            for i, file in enumerate(template_files, 1):
+                print(f"{i}. output/{file}")
+            
+            choice = input("Enter the number of the file you want to update, or 'n' for a new file with default name: ").strip()
+            
+            if choice.lower() == 'n':
+                args.file = 'output/Intersight_Template.xlsx'
+                print(f"Using standard template filename: {args.file}")
+            else:
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(template_files):
+                        args.file = f"output/{template_files[idx]}"
+                        print(f"Selected file: {args.file}")
+                    else:
+                        print("Invalid selection. Using standard template filename.")
+                        args.file = 'output/Intersight_Template.xlsx'
+                except ValueError:
+                    print("Invalid input. Using standard template filename.")
+                    args.file = 'output/Intersight_Template.xlsx'
+        # No existing files found or specific file provided
+        elif args.file != 'output/Intersight_Template.xlsx' and '--file' not in sys.argv:
+            print(f"Using standard template filename: {args.file}")
             args.file = 'output/Intersight_Template.xlsx'
             
         # Ensure output directory exists

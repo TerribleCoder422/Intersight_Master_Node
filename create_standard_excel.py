@@ -33,10 +33,10 @@ def create_standard_excel(excel_file):
         orgs = ["default", "Organization-2", "Organization-3", "Organization-4"]
         resource_groups = ["default", "Resource-Group-2", "Resource-Group-3", "Resource-Group-4"]
         server_options = [
-            "WMP2528012M | C220M5-Hosting-Server1", 
-            "WMP2528012G | C220M5-Hosting-Server2",
-            "WMP25280129 | C220M5-Hosting-Server3",
-            "FCH2342W02W | C480MLM5-RH-CP-Worker1"
+            "XXXXX | Example Server 1", 
+            "YYYYY | Example Server 2",
+            "ZZZZZ | Example Server 3",
+            "AAAAA | Example Worker 1"
         ]
         
         # Create the Profiles sheet
