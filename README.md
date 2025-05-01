@@ -1,6 +1,6 @@
 # Automate-Intersight
 
-A Python project for automating Cisco Intersight operations, including pools, policies, templates, and server profiles via standardized Excel templates.
+A Python project for automating Cisco Intersight operations, including pools, policies, templates, and server profiles via standardized Excel templates with dynamic resource group filtering.
 
 ## Overview
 
@@ -15,6 +15,8 @@ This project provides tools to interact with Cisco Intersight, offering a full-c
 
 - **Authentication**: Secure authentication with Intersight using API keys
 - **Standardized Templates**: Automatically generate Excel templates with consistent naming
+- **Dynamic Resource Group Filtering**: Server dropdowns that automatically filter based on resource group selection
+- **Excel-Compatible Named Ranges**: Ensures Excel compatibility while maintaining dynamic filtering capabilities
 - **Idempotent Operations**: Pools, policies and templates are created only if they don't already exist
 - **Pool Management**: Create and manage MAC, UUID, and other pools
 - **Policy Management**: Create and manage BIOS, Boot, vNIC, Storage and other policies
@@ -75,12 +77,13 @@ All dependencies are listed in the `requirements.txt` file and will be installed
    INTERSIGHT_BASE_URL=https://intersight.com
    ```
 
-4. Verify connectivity by running the setup command:
+4. Verify connectivity by running the following commands:
    ```bash
-   python create_intersight_foundation.py --action setup --file dummy.xlsx
+   python create_standard_excel.py
+   python update_intersight_data.py output/Create_Intersight_Template.xlsx
    ```
    
-   If successful, you should see a new file created at `output/AI_POD_master_Template.xlsx`
+   If successful, you should see a new file created at `output/Create_Intersight_Template.xlsx` with data from your Intersight instance.
 
 ### Installation for macOS
 
@@ -107,12 +110,13 @@ All dependencies are listed in the `requirements.txt` file and will be installed
    INTERSIGHT_BASE_URL=https://intersight.com
    ```
 
-4. Verify connectivity by running the setup command:
+4. Verify connectivity by running the following commands:
    ```bash
-   python3 create_intersight_foundation.py --action setup --file dummy.xlsx
+   python3 create_standard_excel.py
+   python3 update_intersight_data.py output/Create_Intersight_Template.xlsx
    ```
    
-   If successful, you should see a new file created at `output/AI_POD_master_Template.xlsx`
+   If successful, you should see a new file created at `output/Create_Intersight_Template.xlsx` with data from your Intersight instance.
 
 ## Usage
 
@@ -121,7 +125,7 @@ All dependencies are listed in the `requirements.txt` file and will be installed
 The recommended workflow consists of the following steps:
 
 1. Create a standardized template
-2. Populate it with Intersight data
+2. Populate it with Intersight data (including dynamic resource group filtering)
 3. Modify the template as needed
 4. Push the configuration to Intersight
 
@@ -130,10 +134,10 @@ The recommended workflow consists of the following steps:
 Generate and set up the standardized Excel template for Intersight configurations:
 
 ```bash
-python create_standard_excel.py --output output/my_template.xlsx
+python3 create_standard_excel.py
 ```
 
-Note: This will always create `output/my_template.xlsx` regardless of the filename provided.
+This creates a standard template at `output/Create_Intersight_Template.xlsx` with the basic structure needed.
 
 The standardized template includes:
 
@@ -154,26 +158,38 @@ The standardized template includes:
 
 ### Update Excel with Intersight Data
 
-Fetch data from Intersight and update the Excel template with dynamic dropdowns:
+Fetch data from Intersight and update the Excel template with dynamic dropdowns and resource group filtering:
 
 ```bash
-python update_intersight_data.py --file output/my_template.xlsx
+python3 update_intersight_data.py output/Create_Intersight_Template.xlsx
 ```
+
+This command:
+- Retrieves organizations, resource groups, and servers from Intersight
+- Creates dynamic server dropdowns that filter based on resource group selection
+- Maps servers to their respective resource groups
+- Creates Excel-compatible named ranges for better compatibility
+- Updates all available dropdown options with current Intersight data
 
 ### Push Configuration to Intersight
 
 Create pools, policies, templates and profiles in Intersight based on the Excel template:
 
 ```bash
-python push_intersight_template.py --action push --file output/my_template.xlsx
+python3 push_intersight_template.py --action all --file output/Create_Intersight_Template.xlsx
 ```
+
+You can also run specific actions:
+- `--action push`: Only create pools and policies
+- `--action template`: Only create server templates
+- `--action profiles`: Only create server profiles
 
 ### Update Server Information
 
 Refresh the list of available servers in your Excel template:
 
 ```bash
-python update_intersight_data.py --file output/my_template.xlsx
+python3 update_intersight_data.py output/Create_Intersight_Template.xlsx
 ```
 
 ## Working with the Excel Template
@@ -214,16 +230,37 @@ The Template tab allows you to define UCS Server Profile templates with:
 The Profiles Tab displays UCS Server Profiles with:
 - Profile Name
 - Description
-- Template
-- Target Server
-- Status
 - Organization
-- Created Date
-- Actions
+- Resource Group
+- Template
+- Target Server (dynamically filtered by Resource Group)
+- Status
+- Deploy Option
+
+### ServerMap Sheet
+
+The ServerMap sheet is a hidden sheet that maps servers to their resource groups. This enables the dynamic filtering functionality:
+
+- Each resource group has its own named range of servers
+- The named ranges follow the pattern: `ResourceGroupName_Servers`
+- These named ranges are referenced via INDIRECT formulas in the Profiles sheet
+- When you select a resource group in a row, the Server dropdown for that row automatically filters to only show servers belonging to that resource group
 
 ### Documentation Tab
 
 For pre-configured templates, a Documentation tab is included with detailed specifications and configuration notes.
+
+### Excel Compatibility Improvements
+
+This solution includes several enhancements to ensure compatibility with Excel while maintaining dynamic filtering functionality:
+
+- Uses Excel-compatible named ranges with proper formatting
+- Implements CONCATENATE() instead of the & operator in Excel formulas for better compatibility
+- Ensures named ranges comply with Excel's 31-character limitation
+- Creates proper scope for named ranges to avoid repair warnings
+- Handles empty resource groups gracefully to prevent Excel errors
+
+These improvements help eliminate Excel repair warnings while preserving the dynamic resource group filtering capability.
 
 ## Requirements
 
